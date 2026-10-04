@@ -4,7 +4,7 @@
 
 Double bookings, double spends, a coupon redeemed twice, stock going negative. These bugs only show up when two requests arrive at the same moment, so a normal test suite, which sends one request at a time, never catches them. With Deadheat, you describe a rule that must always hold (for example, "bookings for a slot never exceed its capacity") and it hits your API with precisely synchronized concurrent requests to break that rule. Later versions add a proxy in front of Postgres that pauses and reorders queries to force the dangerous timing. When the rule breaks, Deadheat shows the exact sequence of requests and queries that caused it, so you can replay it.
 
-**Status:** v0. Burst mode works end to end (`deadheat run`). It isn't on npm yet. The database proxy (v1) comes next.
+**Status:** v0 done: burst mode works end to end (`deadheat run`). v1 in progress: `deadheat proxy` already sits between an app and Postgres and logs every simple-protocol query. Not on npm yet.
 
 ## Local development
 
@@ -55,6 +55,25 @@ see [scenarios/booking-oversell.ts](scenarios/booking-oversell.ts) and
 the options. Exit codes: `0` no violation, `1` invariant violated, `2` error (including "no request reached the app"), so it can fail a CI job.
 
 If the API sits behind a proxy or load balancer, add `--settle 50` (see [BENCHMARKS.md §3](docs/BENCHMARKS.md)).
+
+## Watch an app's queries
+
+```bash
+node packages/cli/dist/bin.js proxy --upstream localhost:55432    # listens on :55433
+# then point the app at the proxy:
+DATABASE_URL=postgres://deadheat:deadheat@127.0.0.1:55433/deadheat corepack pnpm start
+```
+
+```
+#1   connected  user=deadheat db=deadheat
+#1       0.7ms [T] BEGIN → BEGIN
+#1       0.9ms [E] SELECT * FROM no_such_table → ERROR 42P01 relation "no_such_table" does not exist
+#1       0.4ms [I] ROLLBACK → ROLLBACK
+#1       1.6ms [I] SELECT id, capacity FROM slots → SELECT 1 (1 row)
+#1   closed after 4 queries
+```
+
+Parameterised (extended-protocol) queries pass through but are decoded only from Week 5.
 
 ## Demo apps
 

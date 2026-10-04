@@ -27,6 +27,11 @@
   },
   "dependencies": {
     "@deadheat/core": "workspace:*",
+    "@deadheat/proxy": "workspace:*",
     "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.1"
   }
 }

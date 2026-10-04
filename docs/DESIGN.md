@@ -103,7 +103,7 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
 
 **Synchronized release (v0 strategy `sync`).** Open N raw TCP connections (`net`, `setNoDelay`), write every request except its last byte, wait until every write is handed to the kernel, optionally wait `settleMs`, then write the final byte on all sockets in one synchronous loop. Responses use `Connection: close` and a minimal parser. The settle default is 0: on a direct connection any pause widens the arrival spread, but behind a proxy that connects upstream lazily, settle 0 collapses the hit rate. Users pass `--settle` above the client→server latency in that case ([BENCHMARKS.md §2–3](BENCHMARKS.md)). HTTP/2 single-packet release is deferred: Fastify and Express serve HTTP/1.1 by default.
 
-### v1 sketch (Weeks 4–7)
+### v1: the proxy (Weeks 4–7)
 
 ```
  app ──(pg, tagged by agent: /* deadheat_rid=… */)──► deadheat proxy ──► Postgres
@@ -111,8 +111,17 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
                                                           └─ attributes queries to requests, delays reads
 ```
 
-- **Agent**: wraps `pg` so every query carries the HTTP request id as a SQL comment (sqlcommenter style), using AsyncLocalStorage.
-- **Proxy**: a Node `net` TCP proxy that parses the Postgres wire protocol (simple + extended query), reads the tag, and records per-request query traces.
+**Built in Week 4** (`packages/proxy`, `deadheat proxy`):
+
+- A Node `net` TCP proxy. Each direction runs through a `FrameDecoder` that turns the byte stream into whole protocol messages (`type + int32 length + payload`; the client's first message is untyped). The proxy forwards **message by message, using the original bytes**, never re-encoded. Week 6 can then hold one specific message (e.g. the DataRows of a read) without touching the rest.
+- **Startup:** SSLRequest/GSSENCRequest are answered `N` by the proxy, so the app↔proxy hop stays plaintext and readable. SCRAM authentication passes through untouched, and the proxy never sees the password. Not meant for production traffic.
+- **Query tracker:** a per-connection state machine. `Q` opens a query; `D`/`C`/`E` accumulate rows, command tags and errors; `ReadyForQuery` closes it and reports the transaction status (`I`/`T`/`E`). Week 4 decodes the **simple** protocol. Extended-protocol messages are forwarded but not yet decoded.
+- **Overhead:** +30–45µs per round trip, 68% throughput ([BENCHMARKS.md §5](BENCHMARKS.md)).
+
+**Next (Week 5):**
+
+- **Extended protocol:** Parse/Bind/Execute/Sync. `pg` and every ORM use it for parameterised queries, so all of the demo apps' queries are still invisible to the tracker.
+- **Agent:** wraps `pg` so every query carries the HTTP request id as a SQL comment (sqlcommenter style), using AsyncLocalStorage. The proxy reads the tag and groups queries per request.
 
 ## 6. Report format
 

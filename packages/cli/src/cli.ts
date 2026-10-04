@@ -11,6 +11,7 @@ import {
   VERSION,
   type Strategy,
 } from "@deadheat/core";
+import { startProxy, type ProxyEvent } from "@deadheat/proxy";
 import postgres from "postgres";
 
 export const EXIT_OK = 0;
@@ -22,6 +23,8 @@ export interface Io {
   err: (text: string) => void;
   cwd: string;
   env: Record<string, string | undefined>;
+  /** Stops long-running commands (`deadheat proxy`). Defaults to Ctrl-C / SIGTERM. */
+  signal?: AbortSignal;
 }
 
 const defaultIo: Io = {
@@ -31,12 +34,15 @@ const defaultIo: Io = {
   env: process.env,
 };
 
+export const DEFAULT_PROXY_PORT = 55433;
+
 const HELP = `deadheat ${VERSION}: find the race conditions in your API before your users do
 
 Usage:
-  deadheat run <scenario.ts> [options]
+  deadheat run <scenario.ts> [options]     attack an API and check the invariant
+  deadheat proxy [options]                 sit between an app and Postgres, print every query
 
-Options:
+Run options:
   --strategy <name>      ${Object.keys(strategies).join(" | ")} (default: sync)
   --trials <n>           number of trials (default: the scenario's \`trials\`, else 100)
   --settle <ms>          sync only: wait between priming and release (default: ${DEFAULT_SETTLE_MS}).
@@ -45,6 +51,11 @@ Options:
   --database-url <url>   database for setup/invariant (or env DEADHEAT_DATABASE_URL)
   --no-save              don't write the run to .deadheat/runs/<run-id>.json
   --verbose              list every violating trial in full
+
+Proxy options:
+  --upstream <host:port> the real Postgres (default: host/port of DEADHEAT_DATABASE_URL)
+  --port <n>             port to listen on (default: ${DEFAULT_PROXY_PORT}); point the app's DATABASE_URL here
+
   -h, --help             show this help
   -v, --version          show the version
 
@@ -53,6 +64,7 @@ Exit codes: 0 no violation, 1 invariant violated, 2 error or aborted run.
 
 /** The whole CLI as a function, so tests can run it without spawning a process. */
 export async function main(argv: string[], io: Io = defaultIo): Promise<number> {
+  if (argv[0] === "proxy") return proxyCommand(argv.slice(1), io);
   let parsed;
   try {
     parsed = parseArgs({
@@ -157,4 +169,88 @@ function pickStrategy(name: string, settle: string | undefined): Strategy | stri
     strategies[name] ??
     `unknown strategy "${name}". Use one of: ${Object.keys(strategies).join(", ")}`
   );
+}
+
+async function proxyCommand(argv: string[], io: Io): Promise<number> {
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: argv,
+      options: {
+        upstream: { type: "string" },
+        port: { type: "string", default: String(DEFAULT_PROXY_PORT) },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    }));
+  } catch (err) {
+    io.err(`${(err as Error).message}\n\n${HELP}`);
+    return EXIT_ERROR;
+  }
+  if (values.help) {
+    io.out(HELP);
+    return EXIT_OK;
+  }
+  const fail = (message: string) => {
+    io.err(`error: ${message}\n`);
+    return EXIT_ERROR;
+  };
+
+  let upstream = values.upstream;
+  if (!upstream && io.env.DEADHEAT_DATABASE_URL) {
+    const url = new URL(io.env.DEADHEAT_DATABASE_URL);
+    upstream = `${url.hostname}:${url.port || 5432}`;
+  }
+  const match = upstream ? /^(.+):(\d+)$/.exec(upstream) : null;
+  if (!match) return fail("pass --upstream host:port (or set DEADHEAT_DATABASE_URL)");
+  const port = Number(values.port);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) return fail("--port must be 0-65535");
+
+  let proxy;
+  try {
+    proxy = await startProxy({
+      upstream: { host: match[1]!, port: Number(match[2]) },
+      port,
+      onEvent: (e) => io.out(`${formatProxyEvent(e)}\n`),
+    });
+  } catch (err) {
+    return fail(`could not listen on port ${port}: ${(err as Error).message}`);
+  }
+  io.err(
+    `deadheat proxy: 127.0.0.1:${proxy.port} → ${upstream}. Point your app's DATABASE_URL at port ${proxy.port}. Ctrl-C to stop.\n`,
+  );
+
+  const signal = io.signal ?? processSignal();
+  await new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve();
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+  await proxy.close();
+  return EXIT_OK;
+}
+
+function processSignal(): AbortSignal {
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  return controller.signal;
+}
+
+/** One log line per proxy event. */
+export function formatProxyEvent(e: ProxyEvent): string {
+  const id = `#${e.connectionId}`.padEnd(4);
+  switch (e.type) {
+    case "connection-open":
+      return `${id} connected  user=${e.user ?? "?"} db=${e.database ?? "?"}${e.applicationName ? ` app=${e.applicationName}` : ""}`;
+    case "connection-close":
+      return `${id} closed after ${e.queries} ${e.queries === 1 ? "query" : "queries"}`;
+    case "query": {
+      const sql = e.sql.replace(/\s+/g, " ").trim();
+      const shown = sql.length > 100 ? `${sql.slice(0, 99)}…` : sql;
+      const outcome = e.error
+        ? `ERROR ${e.error.code} ${e.error.message}`
+        : `${e.commandTags.join(", ")}${e.rows ? ` (${e.rows} ${e.rows === 1 ? "row" : "rows"})` : ""}`;
+      return `${id} ${e.durationMs.toFixed(1).padStart(7)}ms [${e.txStatus}] ${shown} → ${outcome}`;
+    }
+  }
 }

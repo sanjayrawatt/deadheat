@@ -41,9 +41,16 @@ importers:
       '@deadheat/core':
         specifier: workspace:*
         version: link:../packages/core
+      pg:
+        specifier: ^8.23.1
+        version: 8.23.1
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
 
   demo-apps/booking-api:
     dependencies:
@@ -57,6 +64,9 @@ importers:
       '@deadheat/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@deadheat/proxy':
+        specifier: workspace:*
+        version: link:../../packages/proxy
       '@types/pg':
         specifier: ^8.23.1
         version: 8.23.1
@@ -100,9 +110,19 @@ importers:
       '@deadheat/core':
         specifier: workspace:*
         version: link:../core
+      '@deadheat/proxy':
+        specifier: workspace:*
+        version: link:../proxy
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+      pg:
+        specifier: ^8.23.1
+        version: 8.23.1
 
   packages/core:
     dependencies:
@@ -112,6 +132,18 @@ importers:
       tsx:
         specifier: ^4.23.15
         version: 4.23.15
+
+  packages/proxy:
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+      pg:
+        specifier: ^8.23.1
+        version: 8.23.1
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
 
   scenarios:
     dependencies:

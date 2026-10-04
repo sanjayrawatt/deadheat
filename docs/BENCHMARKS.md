@@ -112,3 +112,21 @@ DEADHEAT_DATABASE_URL=postgres://deadheat:deadheat@localhost:55432/deadheat \
 | `lost-update` (absolute `balance = $computed`)        | 99%   | 100% | `money not conserved: total = 100, expected 200` |
 
 Both variants run inside a transaction at READ COMMITTED. The transaction alone doesn't help.
+
+## 5. Proxy overhead (2026-10-04)
+
+Query latency straight to Postgres vs through `deadheat proxy` (the real CLI, in its own process, logging every query). One connection, 2000 sequential queries per row after 200 warm-up; then throughput with a 10-connection pool.
+
+```bash
+docker compose up -d --wait && corepack pnpm build
+cd benchmarks && corepack pnpm proxy-overhead
+```
+
+| Query                | direct p50 | proxy p50 | direct p99 | proxy p99 |
+| -------------------- | ---------- | --------- | ---------- | --------- |
+| simple `SELECT 1`    | 152µs      | 181µs     | 468µs      | 346µs     |
+| extended `SELECT $1` | 148µs      | 188µs     | 215µs      | 385µs     |
+
+Throughput (10 connections, 4000 extended queries): direct 23,314 q/s, proxy 15,818 q/s (**68%**). A second run gave the same picture: +35–44µs p50 per round trip, 67% throughput.
+
+**Reading it:** the proxy adds ~30–45µs per round trip. That's small next to the race windows Deadheat targets (the naive booking handler takes ~5ms per request) and next to the 200ms holds planned for v1. Throughput isn't a goal, because Deadheat runs in test environments, but the 32% hit tells us the per-message decode/forward path is worth profiling before the scheduler adds more work to it.

@@ -41,3 +41,16 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - **False negative found while benchmarking:** with the API not running, every request got ECONNREFUSED, no rows changed, and the run reported **✓ 0 violations**. In CI that would hide a wrong port forever. Now a trial where every request fails aborts the run (exit 2).
 - **Wallet demo** (`naive` = overdraft, `lost-update` = a credit overwritten). My first lost-update scenario never failed: all transfers went 1→2, so every transaction read the same snapshot and wrote the same absolute values, which cancel out. Lost updates only show when two _different_ writers race on the same row, so the scenario now has two senders paying one receiver. Both variants run inside a transaction at READ COMMITTED, and the transaction alone doesn't help.
 - 44 tests (unit + e2e), including "no violation when requests don't overlap" for every buggy variant, so the invariants themselves aren't producing false positives.
+
+## Week 4 (Oct 19 – Oct 25, 2026)
+
+### 2026-10-04: Postgres proxy MVP
+
+- `packages/proxy`: a TCP proxy plus a `FrameDecoder` for the v3 wire protocol. It forwards **frame by frame with the original bytes** rather than piping raw chunks, because Week 6 needs to hold a specific message (a read's result) while letting others through. Retrofitting that onto a byte pipe would be painful.
+- The startup phase is the tricky part of the framing: the client's first message has no type byte, and after an SSLRequest (which the proxy refuses with `N` itself, to keep the hop readable) the _next_ message is untyped again. Tested by feeding streams byte by byte.
+- SCRAM auth passes straight through, so the proxy never needs the password.
+- A query tracker per connection: `Q` → rows/tags/errors → `ReadyForQuery`, which also gives the transaction status (`I`/`T`/`E`). That will matter for deadlock handling later.
+- **The booking API runs unchanged through the proxy** and the oversell is still found: the v1 transparency requirement, covered by an e2e test.
+- Gap this exposes: every demo-app query is parameterised, so `pg` uses the **extended** protocol, and the tracker sees none of them yet. That's Week 5.
+- `deadheat proxy` CLI: a live query log. Overhead +30–45µs per query, throughput 68% of direct.
+- A flaky test taught me that the e2e test files share Postgres rows (slot 1), so they can't run in parallel. Set `fileParallelism: false`. 61 tests, ~3.5s.
