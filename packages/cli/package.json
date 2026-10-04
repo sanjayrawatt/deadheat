@@ -1,0 +1,19 @@
+{
+  "name": "deadheat",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Deadheat finds the race conditions in your API before your users do.",
+  "author": "Sanjay Singh Rawat <sanjaysinghrawatk@gmail.com>",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "deadheat": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@deadheat/core": "workspace:*"
+  }
+}
