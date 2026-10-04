@@ -17,6 +17,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm format:check
-      # build runs tsc in dependency order, so it also typechecks every package
       - run: pnpm build
+      # after build, so packages can see each other's emitted types
+      - run: pnpm typecheck
       - run: pnpm test

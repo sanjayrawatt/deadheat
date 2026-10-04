@@ -18,9 +18,21 @@ corepack pnpm test
 corepack pnpm build
 ```
 
-## Prior art
+## Docs
 
-See [docs/PRIOR_ART.md](docs/PRIOR_ART.md).
+- [Design (v0)](docs/DESIGN.md)
+- [Benchmarks](docs/BENCHMARKS.md)
+- [Prior art](docs/PRIOR_ART.md)
+- [Devlog](DEVLOG.md)
+
+## Demo: the oversell bug
+
+```bash
+docker compose up -d --wait
+cd demo-apps/booking-api
+corepack pnpm start                       # terminal 1: buggy booking API on :4100
+corepack pnpm burst --concurrency 20      # terminal 2: 100 trials of 20 concurrent bookings
+```
 
 ## License
 
