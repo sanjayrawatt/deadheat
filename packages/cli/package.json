@@ -6,8 +6,10 @@
   "author": "Sanjay Singh Rawat <sanjaysinghrawatk@gmail.com>",
   "license": "MIT",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "bin": {
-    "deadheat": "./dist/index.js"
+    "deadheat": "./dist/bin.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -16,7 +16,9 @@
     "pg": "^8.23.1"
   },
   "devDependencies": {
+    "@deadheat/core": "workspace:*",
     "@types/pg": "^8.23.1",
+    "postgres": "^3.4.9",
     "tsx": "^4.23.15"
   }
 }

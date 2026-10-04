@@ -143,7 +143,7 @@ Exit code 1 on any violation, so it works in CI. A JSON copy of every run goes t
 4. **False positives.** An invariant that is wrong, or a setup that leaks state between trials, looks like a race. Mitigation: run the invariant once after setup, before firing (it must pass), and run one sequential control trial per run.
 5. **Overhead and the observer effect.** Deadheat must not change the timing it measures. Keep `sql` off the hot path and measure proxy overhead in BENCHMARKS (v1).
 6. **Prepared statements and the comment tag.** Tagging changes the query text, which can defeat prepared-statement caching in drivers. Needs checking in v1.
-7. **Testing Deadheat itself.** CI has no Postgres yet. Add a Postgres service or Testcontainers before the runner's integration tests land (Week 2).
+7. ~~**Testing Deadheat itself.**~~ Resolved in Week 2: CI runs a Postgres service, and an end-to-end test runs the real runner against booking-api.
 
 ## 8. Alternatives considered
 

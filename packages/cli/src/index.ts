@@ -1,5 +1,2 @@
-#!/usr/bin/env node
-// Placeholder until `deadheat run` lands in Week 3.
-import { VERSION } from "@deadheat/core";
-
-console.log(`deadheat ${VERSION}`);
+// Public API of the `deadheat` package: what scenario files import.
+export * from "@deadheat/core";

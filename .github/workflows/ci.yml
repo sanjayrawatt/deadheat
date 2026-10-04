@@ -7,6 +7,21 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Real Postgres for the end-to-end tests, on the same port as docker-compose.yml.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: deadheat
+          POSTGRES_PASSWORD: deadheat
+          POSTGRES_DB: deadheat
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U deadheat"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

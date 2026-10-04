@@ -10,5 +10,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "postgres": "^3.4.9",
+    "tsx": "^4.23.15"
   }
 }
