@@ -55,7 +55,15 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       break;
     }
 
-    const requests = await strategy.fire(options.baseUrl ?? scenario.baseUrl, specs);
+    const baseUrl = options.baseUrl ?? scenario.baseUrl;
+    const requests = await strategy.fire(baseUrl, specs);
+
+    // If nothing reached the app, the invariant trivially holds, and a green result would
+    // be a lie (e.g. a wrong port in CI). Stop instead.
+    if (requests.length && requests.every((r) => r.error !== undefined)) {
+      result.aborted = `Trial ${trial}: none of the ${requests.length} requests got a response (first error: ${requests[0]!.error}). Is the app running at ${baseUrl}?`;
+      break;
+    }
     const verdict = await scenario.invariant({ sql, responses: requests });
 
     const trialResult: TrialResult = {

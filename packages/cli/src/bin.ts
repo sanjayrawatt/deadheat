@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// Placeholder until `deadheat run` lands in Week 3.
-import { VERSION } from "@deadheat/core";
+import { main } from "./cli.js";
 
-console.log(`deadheat ${VERSION}`);
+process.exitCode = await main(process.argv.slice(2));

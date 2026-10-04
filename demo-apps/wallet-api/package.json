@@ -1,15 +1,14 @@
 {
-  "name": "@deadheat/demo-booking-api",
+  "name": "@deadheat/demo-wallet-api",
   "version": "0.0.0",
   "private": true,
-  "description": "Deliberately buggy booking API (check-then-act oversell) used to demo Deadheat.",
+  "description": "Deliberately buggy wallet API (overdraft and lost update) used to demo Deadheat.",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "typecheck": "tsc -p tsconfig.json",
-    "burst": "tsx scripts/burst.ts"
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "fastify": "^5.12.5",

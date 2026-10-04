@@ -20,6 +20,9 @@ importers:
       eslint-config-prettier:
         specifier: ^10.1.8
         version: 10.1.8(eslint@10.11.0)
+      globals:
+        specifier: ^17.13.0
+        version: 17.13.0
       prettier:
         specifier: ^3.9.9
         version: 3.9.9
@@ -32,6 +35,15 @@ importers:
       vitest:
         specifier: ^5.0.2
         version: 5.0.2(@types/node@22.20.4)(vite@8.3.1(@types/node@22.20.4)(esbuild@0.28.2)(tsx@4.23.15))
+
+  benchmarks:
+    dependencies:
+      '@deadheat/core':
+        specifier: workspace:*
+        version: link:../packages/core
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
 
   demo-apps/booking-api:
     dependencies:
@@ -48,6 +60,34 @@ importers:
       '@types/pg':
         specifier: ^8.23.1
         version: 8.23.1
+      deadheat:
+        specifier: workspace:*
+        version: link:../../packages/cli
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
+      tsx:
+        specifier: ^4.23.15
+        version: 4.23.15
+
+  demo-apps/wallet-api:
+    dependencies:
+      fastify:
+        specifier: ^5.12.5
+        version: 5.12.5
+      pg:
+        specifier: ^8.23.1
+        version: 8.23.1
+    devDependencies:
+      '@deadheat/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+      deadheat:
+        specifier: workspace:*
+        version: link:../../packages/cli
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
@@ -60,6 +100,9 @@ importers:
       '@deadheat/core':
         specifier: workspace:*
         version: link:../core
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
 
   packages/core:
     dependencies:
@@ -747,6 +790,10 @@ packages:
   glob-parent@6.0.2:
     resolution: {integrity: sha512-XxwI8EOhVQgWp6iDL+3b0r86f4d6AX6zSU55HfB4ydCEuXLXc5FcYeOu+nnGftS4TEju/11rt4KJPTMgbfmv4A==}
     engines: {node: '>=10.13.0'}
+
+  globals@17.13.0:
+    resolution: {integrity: sha512-RwMTC61u7hrG3ZJMkZQOK4JLJrKS8QtoTii63EmWvFXHqycY9FObBJQCbsLxSO8kjKhWE5kV1GC+Vb1g3RI0Zg==}
+    engines: {node: '>=18'}
 
   hashery@1.5.1:
     resolution: {integrity: sha512-iZyKG96/JwPz1N55vj2Ie2vXbhu440zfUfJvSwEqEbeLluk7NnapfGqa7LH0mOsnDxTF85Mx8/dyR6HfqcbmbQ==}
@@ -1869,6 +1916,8 @@ snapshots:
   glob-parent@6.0.2:
     dependencies:
       is-glob: 4.0.3
+
+  globals@17.13.0: {}
 
   hashery@1.5.1:
     dependencies:

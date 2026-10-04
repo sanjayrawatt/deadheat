@@ -17,5 +17,16 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # Optional: network latency/jitter between a client and the API, for benchmarks only.
+  # Start with: docker compose --profile bench up -d
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    profiles: ["bench"]
+    ports:
+      - "8474:8474" # control API
+      - "4101:4101" # proxied booking-api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   pgdata:

@@ -1,0 +1,17 @@
+{
+  "name": "@deadheat/benchmarks",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reproducible benchmarks behind docs/BENCHMARKS.md.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "arrival-spread": "tsx arrival-spread.ts",
+    "jitter-hit-rate": "tsx jitter-hit-rate.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@deadheat/core": "workspace:*",
+    "postgres": "^3.4.9"
+  }
+}

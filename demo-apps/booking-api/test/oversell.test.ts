@@ -1,7 +1,8 @@
 // End-to-end: Deadheat's core runner + the real scenario file against the real booking API
 // and Postgres. Needs `docker compose up -d` locally; CI provides a Postgres service.
 import { fileURLToPath } from "node:url";
-import { loadScenario, naive, runScenario } from "@deadheat/core";
+import { loadScenario, naive, runScenario, type Scenario } from "@deadheat/core";
+import { EXIT_VIOLATION, main } from "deadheat/cli";
 import type { FastifyInstance } from "fastify";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -41,5 +42,29 @@ describe("booking-oversell scenario", () => {
     const failed = run.trials.find((t) => !t.passed);
     expect(failed?.violation).toMatch(/^bookings = \d+, capacity = 1$/);
     expect(failed?.requests.filter((r) => r.status === 201).length).toBeGreaterThan(1);
+  });
+
+  it("reports no violation when requests don't overlap (no false positives)", async () => {
+    const scenario = await loadScenario(scenarioPath);
+    const oneAtATime: Scenario = { ...scenario, actions: { ...scenario.actions, concurrency: 1 } };
+    const run = await runScenario(oneAtATime, { strategy: naive, sql, baseUrl, trials: 5 });
+    expect(run.violations).toBe(0);
+  });
+
+  it("works end to end through the CLI and exits 1 on a violation", async () => {
+    const out: string[] = [];
+    const code = await main(
+      ["run", scenarioPath, "--base-url", baseUrl, "--trials", "10", "--settle", "5", "--no-save"],
+      {
+        out: (t) => void out.push(t),
+        err: () => {},
+        cwd: process.cwd(),
+        env: { DEADHEAT_DATABASE_URL: process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL },
+      },
+    );
+    expect(code).toBe(EXIT_VIOLATION);
+    expect(out.join("")).toMatch(
+      /✗ slot is never oversold: \d+\/10 trials violated .*strategy=sync\(settle=5ms\)/,
+    );
   });
 });

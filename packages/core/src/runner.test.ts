@@ -75,6 +75,25 @@ describe("runScenario", () => {
     expect(setup).toHaveBeenCalledTimes(3);
   });
 
+  it("aborts instead of passing when no request reaches the app", async () => {
+    const state = { trial: 0 };
+    const unreachable: Strategy = {
+      name: "fake",
+      fire: async (_baseUrl, specs) =>
+        specs.map((s, index) => ({
+          index,
+          method: s.method,
+          url: s.url,
+          sentAtMs: 0,
+          error: "connect ECONNREFUSED 127.0.0.1:4100",
+        })),
+    };
+    const run = await runScenario(makeScenario([], state), { strategy: unreachable, sql });
+    expect(run.aborted).toMatch(/none of the 3 requests got a response .*ECONNREFUSED/);
+    expect(run.aborted).toContain("http://127.0.0.1:1");
+    expect(run.trials).toHaveLength(0);
+  });
+
   it("aborts instead of reporting a race when the invariant fails before any request", async () => {
     const state = { trial: 0 };
     const fire = vi.fn();

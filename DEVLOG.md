@@ -28,3 +28,16 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - `scenarios/booking-oversell.ts` imports from `"deadheat"`, the same way a real user would. The `deadheat` package re-exports core, and the CLI binary moved to `bin.ts`.
 - End-to-end test: the real runner + scenario file + booking API + Postgres. CI now runs a Postgres service container.
 - First real report: 99/100 trials violated, matching the Week 1 burst script, so the runner agrees with the baseline. Naive client-side send spread: p50 0.52ms, p99 1.43ms. That's the number `sync` must shrink in Week 3.
+
+## Week 3 (Oct 12 – Oct 18, 2026)
+
+### 2026-10-04: sync release, CLI, wallet demo
+
+- **`sync` strategy:** last-byte synchronization over raw `net` sockets, not undici. I need the `write` callback to know the primed bytes reached the kernel, and undici doesn't expose it.
+- **Arrival spread** (server in a separate process): at the socket level, sync's p50 is ~160µs vs ~250µs for naive, about 35–40% tighter. At the HTTP level the gain mostly disappears, because Node's event loop parses requests one by one (~13µs each). On localhost the server, not the network, sets the floor.
+- **Biggest surprise:** through Toxiproxy, sync was _much worse_ than naive (53% vs 99% hit rate). Debugging showed the proxy opens its upstream connection only when we connect, and we released before it finished, so it was still holding the primed bytes. Added a `settleMs` option, and settle 50ms restored 99%. But on a direct connection every ms of settle _widens_ the spread (0ms → 223µs, 50ms → 665µs, cause not pinned down). **Decision:** default settle 0, plus a documented `--settle` for proxied targets. Good interview story: a "precision" technique that silently breaks behind a middlebox.
+- Under 10ms jitter, naive and sync both fall to ~50%. Last-byte sync can't beat per-packet jitter. That's the argument for v1 (control timing at the DB) or HTTP/2 single-packet.
+- **`deadheat run` CLI:** strategies, `--trials`, `--settle`, `--base-url`, runs saved to `.deadheat/runs/`, exit codes 0/1/2.
+- **False negative found while benchmarking:** with the API not running, every request got ECONNREFUSED, no rows changed, and the run reported **✓ 0 violations**. In CI that would hide a wrong port forever. Now a trial where every request fails aborts the run (exit 2).
+- **Wallet demo** (`naive` = overdraft, `lost-update` = a credit overwritten). My first lost-update scenario never failed: all transfers went 1→2, so every transaction read the same snapshot and wrote the same absolute values, which cancel out. Lost updates only show when two _different_ writers race on the same row, so the scenario now has two senders paying one receiver. Both variants run inside a transaction at READ COMMITTED, and the transaction alone doesn't help.
+- 44 tests (unit + e2e), including "no violation when requests don't overlap" for every buggy variant, so the invariants themselves aren't producing false positives.

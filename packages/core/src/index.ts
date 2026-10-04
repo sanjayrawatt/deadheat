@@ -4,4 +4,5 @@ export * from "./types.js";
 export { runScenario, DEFAULT_TRIALS, type RunOptions } from "./runner.js";
 export { loadScenario, validateScenario } from "./loader.js";
 export { formatRun, percentile, sendSpread, type ReportOptions } from "./report.js";
-export { naive } from "./strategies/naive.js";
+export { naive, sync, createSync, strategies } from "./strategies/index.js";
+export { DEFAULT_SETTLE_MS, type SyncOptions } from "./strategies/sync.js";

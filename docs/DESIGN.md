@@ -101,7 +101,7 @@ Decisions:
 
 Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument parsing, loading `.ts` scenarios via `tsx`).
 
-**Synchronized release (v0 strategy `sync`).** Open N HTTP/1.1 connections with undici, write every request except its last byte, wait until all N are primed, then flush the final byte on all sockets in one tick. HTTP/2 single-packet release is deferred: Fastify and Express serve HTTP/1.1 by default, and the first benchmark showed no headroom on localhost anyway (§7).
+**Synchronized release (v0 strategy `sync`).** Open N raw TCP connections (`net`, `setNoDelay`), write every request except its last byte, wait until every write is handed to the kernel, optionally wait `settleMs`, then write the final byte on all sockets in one synchronous loop. Responses use `Connection: close` and a minimal parser. The settle default is 0: on a direct connection any pause widens the arrival spread, but behind a proxy that connects upstream lazily, settle 0 collapses the hit rate. Users pass `--settle` above the client→server latency in that case ([BENCHMARKS.md §2–3](BENCHMARKS.md)). HTTP/2 single-packet release is deferred: Fastify and Express serve HTTP/1.1 by default.
 
 ### v1 sketch (Weeks 4–7)
 
@@ -137,10 +137,10 @@ Exit code 1 on any violation, so it works in CI. A JSON copy of every run goes t
    - (a) Make **arrival spread** the primary metric for sync vs naive, which is measurable anywhere.
    - (b) Compare hit rates under injected network jitter (Toxiproxy between client and API).
    - (c) Run the client from a second machine or a cloud VM.
-   - Leaning (a) + (b). **Needs a decision before Week 3.**
+   - **Decided (2026-10-04): (a) + (b).** Results in [BENCHMARKS.md §2–3](BENCHMARKS.md): sync narrows raw arrival spread by ~35–40% and slightly raises the direct hit rate (95% → 99%). Under 10ms jitter both strategies fall to ~50%, which is the case for v1's database-level control.
 2. **Replay needs the scheduler.** Exact replay means forcing query order, which needs hold/release (Week 8). So replay and seeds either move to Weeks 8–9, or Week 7 builds a minimal hold/release.
 3. **The proxy can't know at read time whether a write will follow.** For widening, either learn read→write fingerprints in a first, unwidened trial, or delay every read inside an explicit transaction.
-4. **False positives.** An invariant that is wrong, or a setup that leaks state between trials, looks like a race. Mitigation: run the invariant once after setup, before firing (it must pass), and run one sequential control trial per run.
+4. **False positives and false negatives.** An invariant that is wrong, or a setup that leaks state between trials, looks like a race. _Implemented:_ a pre-flight invariant check after setup (it must pass before firing). The opposite failure is also real: if no request reaches the app (wrong port, app down), the invariant trivially holds and the run looks green. _Implemented:_ a trial where every request errors aborts the run (exit 2). _Planned:_ one sequential control trial per run.
 5. **Overhead and the observer effect.** Deadheat must not change the timing it measures. Keep `sql` off the hot path and measure proxy overhead in BENCHMARKS (v1).
 6. **Prepared statements and the comment tag.** Tagging changes the query text, which can defeat prepared-statement caching in drivers. Needs checking in v1.
 7. ~~**Testing Deadheat itself.**~~ Resolved in Week 2: CI runs a Postgres service, and an end-to-end test runs the real runner against booking-api.
@@ -150,7 +150,7 @@ Exit code 1 on any violation, so it works in CI. A JSON copy of every run goes t
 | Decision                 | Chosen                                   | Rejected, and why                                                                                                                                 |
 | ------------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Scenario language        | TypeScript                               | **YAML**: invariants are real logic (SQL plus comparisons). YAML would need an expression language and loses type checking.                       |
-| HTTP client for `sync`   | undici (raw socket control)              | **fetch/axios**: no control over when the last byte is written.                                                                                   |
+| HTTP client for `sync`   | Raw `net` sockets                        | **undici**: no way to know when primed bytes reached the kernel. **fetch/axios**: no control over when the last byte is written.                  |
 | Detection approach       | Black-box: run requests, check invariant | **Static analysis** (ReqRace style): finds candidates but proves nothing. **Log analysis** (ACIDRain style): offline, can't reproduce.            |
 | Query attribution (v1)   | SQL comment tag + wire proxy             | **ORM hooks only**: tied to one ORM and can't delay or reorder at the DB boundary. **Postgres extension**: needs DB superuser and a custom build. |
 | Proxy language           | Node `net`                               | **Go**: faster, but adds a language before the design is proven. Possible later rewrite.                                                          |
