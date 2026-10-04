@@ -1,4 +1,4 @@
-import type { RequestTrace, RunResult, TrialResult } from "./types.js";
+import type { QueryRecord, RequestTrace, RunResult, TrialResult } from "./types.js";
 
 export interface ReportOptions {
   /** How many violating trials to show in detail. */
@@ -59,7 +59,45 @@ function formatTrial(trial: TrialResult, maxRequests: number): string[] {
   if (ordered.length > maxRequests) {
     lines.push(`    … ${ordered.length - maxRequests} more requests`);
   }
+  lines.push(...formatInterleaving(ordered.slice(0, maxRequests)));
   return lines;
+}
+
+/**
+ * The SQL of the listed requests, merged by start time. This is the interleaving that broke
+ * the invariant, e.g. two COUNTs that both see 0 before either INSERT.
+ */
+function formatInterleaving(requests: readonly RequestTrace[]): string[] {
+  const steps = requests
+    .flatMap((r) => (r.queries ?? []).map((q) => ({ r, q })))
+    .sort((a, b) => a.q.startedAt - b.q.startedAt);
+  if (!steps.length) return [];
+  const lines = ["    SQL, in the order it ran:"];
+  for (const { r, q } of steps) {
+    lines.push(
+      `      #${String(r.index).padEnd(3)} ${oneLine(q.sql)}${paramList(q)} → ${queryOutcome(q)}`,
+    );
+  }
+  return lines;
+}
+
+function oneLine(sql: string): string {
+  const flat = sql.replace(/\s+/g, " ").trim();
+  return flat.length > 90 ? `${flat.slice(0, 89)}…` : flat;
+}
+
+function paramList(q: QueryRecord): string {
+  if (!q.params?.length) return "";
+  return `  [${q.params.map((p) => (p === null ? "null" : p)).join(", ")}]`;
+}
+
+function queryOutcome(q: QueryRecord): string {
+  if (q.error) return `ERROR ${q.error.code} ${q.error.message}`;
+  if (q.firstRow) {
+    const values = q.firstRow.map((v) => (v === null ? "null" : v));
+    return values.length === 1 ? values[0]! : `(${values.join(", ")})`;
+  }
+  return q.commandTags.join(", ") || "ok";
 }
 
 function rank(r: RequestTrace): number {

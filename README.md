@@ -4,7 +4,7 @@
 
 Double bookings, double spends, a coupon redeemed twice, stock going negative. These bugs only show up when two requests arrive at the same moment, so a normal test suite, which sends one request at a time, never catches them. With Deadheat, you describe a rule that must always hold (for example, "bookings for a slot never exceed its capacity") and it hits your API with precisely synchronized concurrent requests to break that rule. Later versions add a proxy in front of Postgres that pauses and reorders queries to force the dangerous timing. When the rule breaks, Deadheat shows the exact sequence of requests and queries that caused it, so you can replay it.
 
-**Status:** v0 done: burst mode works end to end (`deadheat run`). v1 in progress: `deadheat proxy` already sits between an app and Postgres and logs every simple-protocol query. Not on npm yet.
+**Status:** v0 done (burst mode, `deadheat run`). v1 in progress: `deadheat proxy` sits between the app and Postgres, and with the agent in the app, every report shows each request's SQL in the order it ran. Not on npm yet.
 
 ## Local development
 
@@ -56,24 +56,29 @@ the options. Exit codes: `0` no violation, `1` invariant violated, `2` error (in
 
 If the API sits behind a proxy or load balancer, add `--settle 50` (see [BENCHMARKS.md §3](docs/BENCHMARKS.md)).
 
-## Watch an app's queries
+## See the SQL behind the race
+
+Run Deadheat's proxy between the app and Postgres, and add `@deadheat/agent` to the app (two lines: `instrumentPg(pg)` and `registerFastify(app)`, as the demo apps do):
 
 ```bash
-node packages/cli/dist/bin.js proxy --upstream localhost:55432    # listens on :55433
-# then point the app at the proxy:
-DATABASE_URL=postgres://deadheat:deadheat@127.0.0.1:55433/deadheat corepack pnpm start
+node packages/cli/dist/bin.js proxy --upstream localhost:55432        # app port :55433, control :55434
+cd demo-apps/booking-api && DATABASE_URL=postgres://deadheat:deadheat@127.0.0.1:55433/deadheat corepack pnpm start
+node packages/cli/dist/bin.js run scenarios/booking-oversell.ts --proxy http://127.0.0.1:55434
 ```
 
 ```
-#1   connected  user=deadheat db=deadheat
-#1       0.7ms [T] BEGIN → BEGIN
-#1       0.9ms [E] SELECT * FROM no_such_table → ERROR 42P01 relation "no_such_table" does not exist
-#1       0.4ms [I] ROLLBACK → ROLLBACK
-#1       1.6ms [I] SELECT id, capacity FROM slots → SELECT 1 (1 row)
-#1   closed after 4 queries
+  Trial 2: bookings = 18, capacity = 1
+    …
+    SQL, in the order it ran:
+      #0   SELECT capacity FROM slots WHERE id = $1  [1] → 1
+      #1   SELECT capacity FROM slots WHERE id = $1  [1] → 1
+      #0   SELECT COUNT(*)::int AS count FROM bookings WHERE slot_id = $1  [1] → 0
+      #1   SELECT COUNT(*)::int AS count FROM bookings WHERE slot_id = $1  [1] → 0
+      #0   INSERT INTO bookings (slot_id, user_id) VALUES ($1, $2) RETURNING id  [1, 1] → 50474
+      #1   INSERT INTO bookings (slot_id, user_id) VALUES ($1, $2) RETURNING id  [1, 2] → 50475
 ```
 
-Parameterised (extended-protocol) queries pass through but are decoded only from Week 5.
+Both requests counted 0 bookings before either inserted: check-then-act on a stale read. (Trimmed from a real run of 5 shown requests.) Without `--proxy`, `deadheat proxy` on its own prints a live log of every query.
 
 ## Demo apps
 

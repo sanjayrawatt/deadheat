@@ -130,3 +130,7 @@ cd benchmarks && corepack pnpm proxy-overhead
 Throughput (10 connections, 4000 extended queries): direct 23,314 q/s, proxy 15,818 q/s (**68%**). A second run gave the same picture: +35–44µs p50 per round trip, 67% throughput.
 
 **Reading it:** the proxy adds ~30–45µs per round trip. That's small next to the race windows Deadheat targets (the naive booking handler takes ~5ms per request) and next to the 200ms holds planned for v1. Throughput isn't a goal, because Deadheat runs in test environments, but the 32% hit tells us the per-message decode/forward path is worth profiling before the scheduler adds more work to it.
+
+### 5b. After adding extended-protocol decoding (2026-10-05)
+
+The tracker now decodes Parse/Bind/Execute/DataRow (parameters and the first row) for every query. Re-running `corepack pnpm proxy-overhead` gave extended-query p50 overheads of **+70 to +92µs** (vs +40µs before) and throughput of 38–60% of direct. **These runs were on a loaded machine.** Direct-to-Postgres p90/p99 were 2–5× worse than in §5, so the numbers are indicative only. Re-measure on an idle machine before quoting them. `proxy-overhead` now runs the proxy with `--quiet` by default (no per-query log line, as under `deadheat run --proxy`). Pass `--log` to include logging.

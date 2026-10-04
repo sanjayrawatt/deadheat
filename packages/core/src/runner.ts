@@ -1,6 +1,14 @@
 import { randomBytes } from "node:crypto";
 import type { Sql } from "postgres";
-import type { RequestSpec, RunResult, Scenario, Strategy, TrialResult } from "./types.js";
+import {
+  REQUEST_ID_HEADER,
+  type QueryLog,
+  type RequestSpec,
+  type RunResult,
+  type Scenario,
+  type Strategy,
+  type TrialResult,
+} from "./types.js";
 
 export interface RunOptions {
   strategy: Strategy;
@@ -9,6 +17,8 @@ export interface RunOptions {
   trials?: number;
   /** Overrides `scenario.baseUrl`, e.g. when the app under test runs on another port. */
   baseUrl?: string;
+  /** Attaches the app's SQL to each request trace (needs the agent in the app). */
+  queryLog?: QueryLog;
   /** Called after every trial, e.g. to print progress. */
   onTrial?: (result: TrialResult) => void;
 }
@@ -56,13 +66,23 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     }
 
     const baseUrl = options.baseUrl ?? scenario.baseUrl;
-    const requests = await strategy.fire(baseUrl, specs);
+    const ids = specs.map((_, i) => `${result.runId}.${trial}.${i}`);
+    const tagged = specs.map((spec, i) => ({
+      ...spec,
+      headers: { ...spec.headers, [REQUEST_ID_HEADER]: ids[i]! },
+    }));
+    const requests = await strategy.fire(baseUrl, tagged);
+    requests.forEach((r) => (r.requestId = ids[r.index]!));
 
     // If nothing reached the app, the invariant trivially holds, and a green result would
     // be a lie (e.g. a wrong port in CI). Stop instead.
     if (requests.length && requests.every((r) => r.error !== undefined)) {
       result.aborted = `Trial ${trial}: none of the ${requests.length} requests got a response (first error: ${requests[0]!.error}). Is the app running at ${baseUrl}?`;
       break;
+    }
+    if (options.queryLog) {
+      const byId = await options.queryLog.take(ids);
+      for (const r of requests) r.queries = byId[r.requestId!] ?? [];
     }
     const verdict = await scenario.invariant({ sql, responses: requests });
 

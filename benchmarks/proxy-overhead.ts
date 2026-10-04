@@ -2,7 +2,8 @@
 // The proxy runs in its own process (the real CLI), so it doesn't share the client's event loop.
 //
 // Needs: docker compose up -d, and a build (`corepack pnpm build`).
-// Usage: corepack pnpm proxy-overhead [--queries 2000] [--port 55499]
+// Usage: corepack pnpm proxy-overhead [--queries 2000] [--port 55499] [--log]
+// By default the proxy runs with --quiet (no per-query log line), as under `deadheat run --proxy`.
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -13,6 +14,7 @@ const { values } = parseArgs({
   options: {
     queries: { type: "string", default: "2000" },
     port: { type: "string", default: "55499" },
+    log: { type: "boolean", default: false },
   },
 });
 const N = Number(values.queries);
@@ -28,6 +30,9 @@ const proxyProcess = spawn(
     `${upstream.hostname}:${upstream.port}`,
     "--port",
     values.port,
+    "--control-port",
+    "0",
+    ...(values.log ? [] : ["--quiet"]),
   ],
   { stdio: ["ignore", "ignore", "pipe"] },
 );
@@ -75,7 +80,9 @@ try {
     ["simple   SELECT 1", (c) => c.query("SELECT 1")],
     ["extended SELECT $1", (c) => c.query("SELECT $1::int", [1])],
   ];
-  console.log(`proxy overhead: ${N} sequential queries per row, after 200 warm-up\n`);
+  console.log(
+    `proxy overhead: ${N} sequential queries per row, after 200 warm-up, proxy ${values.log ? "logging" : "--quiet"}\n`,
+  );
   console.log("query                 path      p50 µs   p90 µs   p99 µs");
   for (const [name, q] of cases) {
     for (const [path, url] of [

@@ -53,6 +53,17 @@ describe("deadheat CLI arguments", () => {
     [["run", "x.ts", "--strategy", "naive", "--settle", "5"], /--settle only applies/],
     [["run", "x.ts", "--settle=-1"], /--settle must be/],
     [["run", "x.ts"], /no database/],
+    [
+      [
+        "run",
+        "x.ts",
+        "--database-url",
+        "postgres://x@127.0.0.1:1/x",
+        "--proxy",
+        "http://127.0.0.1:1",
+      ],
+      /cannot reach deadheat proxy/,
+    ],
   ])("rejects %j", async (argv, message) => {
     const t = io();
     expect(await main(argv, t.io)).toBe(EXIT_ERROR);

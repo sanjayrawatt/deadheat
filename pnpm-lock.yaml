@@ -54,6 +54,9 @@ importers:
 
   demo-apps/booking-api:
     dependencies:
+      '@deadheat/agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
       fastify:
         specifier: ^5.12.5
         version: 5.12.5
@@ -82,6 +85,9 @@ importers:
 
   demo-apps/wallet-api:
     dependencies:
+      '@deadheat/agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
       fastify:
         specifier: ^5.12.5
         version: 5.12.5
@@ -104,6 +110,21 @@ importers:
       tsx:
         specifier: ^4.23.15
         version: 4.23.15
+
+  packages/agent:
+    devDependencies:
+      '@deadheat/proxy':
+        specifier: workspace:*
+        version: link:../proxy
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+      fastify:
+        specifier: ^5.12.5
+        version: 5.12.5
+      pg:
+        specifier: ^8.23.1
+        version: 8.23.1
 
   packages/cli:
     dependencies:

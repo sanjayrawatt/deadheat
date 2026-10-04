@@ -9,9 +9,17 @@ import {
   runScenario,
   strategies,
   VERSION,
+  type QueryLog,
+  type QueryRecord,
   type Strategy,
 } from "@deadheat/core";
-import { startProxy, type ProxyEvent } from "@deadheat/proxy";
+import {
+  QueryStore,
+  startControl,
+  startProxy,
+  type ProxyEvent,
+  type QueryEvent,
+} from "@deadheat/proxy";
 import postgres from "postgres";
 
 export const EXIT_OK = 0;
@@ -35,6 +43,7 @@ const defaultIo: Io = {
 };
 
 export const DEFAULT_PROXY_PORT = 55433;
+export const DEFAULT_CONTROL_PORT = 55434;
 
 const HELP = `deadheat ${VERSION}: find the race conditions in your API before your users do
 
@@ -49,12 +58,16 @@ Run options:
                          Use ~50 when the API sits behind a proxy or load balancer
   --base-url <url>       override the scenario's baseUrl
   --database-url <url>   database for setup/invariant (or env DEADHEAT_DATABASE_URL)
+  --proxy <url>          a running \`deadheat proxy\` control URL (e.g. http://127.0.0.1:${DEFAULT_CONTROL_PORT});
+                         adds each request's SQL to the report (the app needs @deadheat/agent)
   --no-save              don't write the run to .deadheat/runs/<run-id>.json
   --verbose              list every violating trial in full
 
 Proxy options:
   --upstream <host:port> the real Postgres (default: host/port of DEADHEAT_DATABASE_URL)
   --port <n>             port to listen on (default: ${DEFAULT_PROXY_PORT}); point the app's DATABASE_URL here
+  --control-port <n>     where \`deadheat run --proxy\` collects queries (default: ${DEFAULT_CONTROL_PORT})
+  -q, --quiet            don't print each query
 
   -h, --help             show this help
   -v, --version          show the version
@@ -77,6 +90,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         settle: { type: "string" },
         "base-url": { type: "string" },
         "database-url": { type: "string" },
+        proxy: { type: "string" },
         save: { type: "boolean", default: true },
         verbose: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -122,6 +136,15 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     return fail("no database: pass --database-url or set DEADHEAT_DATABASE_URL");
   }
 
+  let queryLog: QueryLog | undefined;
+  if (values.proxy) {
+    try {
+      queryLog = await httpQueryLog(values.proxy);
+    } catch (err) {
+      return fail(`cannot reach deadheat proxy at ${values.proxy}: ${(err as Error).message}`);
+    }
+  }
+
   let scenario;
   try {
     scenario = await loadScenario(resolve(io.cwd, scenarioPath));
@@ -136,6 +159,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       sql,
       ...(trials !== undefined ? { trials } : {}),
       ...(values["base-url"] ? { baseUrl: values["base-url"] } : {}),
+      ...(queryLog ? { queryLog } : {}),
       onTrial: (t) => io.err(t.passed ? "." : "x"),
     });
     io.err("\n");
@@ -179,6 +203,8 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
       options: {
         upstream: { type: "string" },
         port: { type: "string", default: String(DEFAULT_PROXY_PORT) },
+        "control-port": { type: "string", default: String(DEFAULT_CONTROL_PORT) },
+        quiet: { type: "boolean", short: "q", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
     }));
@@ -203,20 +229,34 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
   const match = upstream ? /^(.+):(\d+)$/.exec(upstream) : null;
   if (!match) return fail("pass --upstream host:port (or set DEADHEAT_DATABASE_URL)");
   const port = Number(values.port);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) return fail("--port must be 0-65535");
+  const controlPort = Number(values["control-port"]);
+  for (const [flag, n] of [
+    ["--port", port],
+    ["--control-port", controlPort],
+  ] as const) {
+    if (!Number.isInteger(n) || n < 0 || n > 65535) return fail(`${flag} must be 0-65535`);
+  }
 
+  const store = new QueryStore();
   let proxy;
+  let control;
   try {
     proxy = await startProxy({
       upstream: { host: match[1]!, port: Number(match[2]) },
       port,
-      onEvent: (e) => io.out(`${formatProxyEvent(e)}\n`),
+      onEvent: (e) => {
+        if (e.type === "query") store.add(e);
+        if (!values.quiet) io.out(`${formatProxyEvent(e)}\n`);
+      },
     });
+    control = await startControl({ store, port: controlPort });
   } catch (err) {
-    return fail(`could not listen on port ${port}: ${(err as Error).message}`);
+    await proxy?.close();
+    return fail(`could not listen: ${(err as Error).message}`);
   }
   io.err(
-    `deadheat proxy: 127.0.0.1:${proxy.port} → ${upstream}. Point your app's DATABASE_URL at port ${proxy.port}. Ctrl-C to stop.\n`,
+    `deadheat proxy: 127.0.0.1:${proxy.port} → ${upstream}. Point your app's DATABASE_URL at port ${proxy.port}.\n` +
+      `control: http://127.0.0.1:${control.port} (use with deadheat run --proxy). Ctrl-C to stop.\n`,
   );
 
   const signal = io.signal ?? processSignal();
@@ -224,8 +264,44 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
     if (signal.aborted) return resolve();
     signal.addEventListener("abort", () => resolve(), { once: true });
   });
+  await control.close();
   await proxy.close();
   return EXIT_OK;
+}
+
+/** A QueryLog backed by a running proxy's control server. Fails fast if it isn't there. */
+export async function httpQueryLog(controlUrl: string): Promise<QueryLog> {
+  const base = controlUrl.replace(/\/+$/, "");
+  const health = await fetch(`${base}/health`);
+  if (!health.ok) throw new Error(`/health returned ${health.status}`);
+  return {
+    async take(requestIds) {
+      const res = await fetch(`${base}/take`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ requestIds }),
+      });
+      if (!res.ok) throw new Error(`deadheat proxy /take returned ${res.status}`);
+      const { queries } = (await res.json()) as { queries: Record<string, QueryEvent[]> };
+      const out: Record<string, QueryRecord[]> = {};
+      for (const [id, events] of Object.entries(queries)) out[id] = events.map(toRecord);
+      return out;
+    },
+  };
+}
+
+function toRecord(e: QueryEvent): QueryRecord {
+  return {
+    sql: e.sql,
+    ...(e.params ? { params: e.params } : {}),
+    rows: e.rows,
+    ...(e.firstRow ? { firstRow: e.firstRow } : {}),
+    commandTags: e.commandTags,
+    ...(e.error ? { error: e.error } : {}),
+    startedAt: e.startedAt,
+    durationMs: e.durationMs,
+    txStatus: e.txStatus,
+  };
 }
 
 function processSignal(): AbortSignal {
@@ -250,7 +326,8 @@ export function formatProxyEvent(e: ProxyEvent): string {
       const outcome = e.error
         ? `ERROR ${e.error.code} ${e.error.message}`
         : `${e.commandTags.join(", ")}${e.rows ? ` (${e.rows} ${e.rows === 1 ? "row" : "rows"})` : ""}`;
-      return `${id} ${e.durationMs.toFixed(1).padStart(7)}ms [${e.txStatus}] ${shown} → ${outcome}`;
+      const rid = e.requestId ? ` {${e.requestId}}` : "";
+      return `${id} ${e.durationMs.toFixed(1).padStart(7)}ms [${e.txStatus}] ${shown} → ${outcome}${rid}`;
     }
   }
 }

@@ -1,0 +1,20 @@
+{
+  "name": "@deadheat/agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Tags an app's SQL with the id of the HTTP request that caused it, for Deadheat's proxy.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@deadheat/proxy": "workspace:*",
+    "@types/pg": "^8.23.1",
+    "fastify": "^5.12.5",
+    "pg": "^8.23.1"
+  }
+}

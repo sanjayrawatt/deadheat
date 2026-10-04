@@ -106,4 +106,53 @@ describe("runScenario", () => {
     expect(run.violations).toBe(0);
     expect(fire).not.toHaveBeenCalled();
   });
+
+  it("sends a request id header and attaches each request's queries from the query log", async () => {
+    const state = { trial: 0 };
+    const seenHeaders: string[] = [];
+    const strategy: Strategy = {
+      name: "fake",
+      async fire(_b, specs) {
+        state.trial++;
+        return specs.map((s, index) => {
+          seenHeaders.push(s.headers?.["x-deadheat-rid"] ?? "");
+          return { index, method: s.method, url: s.url, sentAtMs: 0, status: 201 };
+        });
+      },
+    };
+    const asked: string[][] = [];
+    const queryLog = {
+      take: async (ids: readonly string[]) => {
+        asked.push([...ids]);
+        return {
+          [ids[0]!]: [
+            {
+              sql: "SELECT 1",
+              rows: 1,
+              commandTags: ["SELECT 1"],
+              startedAt: 1,
+              durationMs: 1,
+              txStatus: "I" as const,
+            },
+          ],
+        };
+      },
+    };
+    const run = await runScenario(makeScenario([], state, { trials: 2 }), {
+      strategy,
+      sql,
+      queryLog,
+    });
+
+    const id = (trial: number, i: number) => `${run.runId}.${trial}.${i}`;
+    expect(seenHeaders).toEqual([id(1, 0), id(1, 1), id(1, 2), id(2, 0), id(2, 1), id(2, 2)]);
+    expect(asked).toEqual([
+      [id(1, 0), id(1, 1), id(1, 2)],
+      [id(2, 0), id(2, 1), id(2, 2)],
+    ]);
+    const [first, second] = run.trials[0]!.requests;
+    expect(first?.requestId).toBe(id(1, 0));
+    expect(first?.queries?.map((q) => q.sql)).toEqual(["SELECT 1"]);
+    expect(second?.queries).toEqual([]);
+  });
 });

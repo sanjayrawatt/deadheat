@@ -1,5 +1,10 @@
 import { readFile } from "node:fs/promises";
+import { instrumentPg } from "@deadheat/agent";
 import pg from "pg";
+
+// Tags every query with the HTTP request that caused it, so Deadheat can attribute it.
+// Harmless without Deadheat: the tag is a SQL comment.
+instrumentPg(pg);
 
 export const DEFAULT_DATABASE_URL = "postgres://deadheat:deadheat@localhost:55432/deadheat";
 

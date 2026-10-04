@@ -54,3 +54,17 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - Gap this exposes: every demo-app query is parameterised, so `pg` uses the **extended** protocol, and the tracker sees none of them yet. That's Week 5.
 - `deadheat proxy` CLI: a live query log. Overhead +30–45µs per query, throughput 68% of direct.
 - A flaky test taught me that the e2e test files share Postgres rows (slot 1), so they can't run in parallel. Set `fileParallelism: false`. 61 tests, ~3.5s.
+
+## Week 5 (Oct 26 – Nov 1, 2026)
+
+### 2026-10-05: extended protocol, agent, attribution
+
+- **Decisions taken (Sanjay delegated):** replay and seeds move to Weeks 8–9, after the scheduler, since exact replay needs hold/release. Widening will use a learning trial, because the proxy can't know at read time whether a write will follow.
+- Extended protocol decoded: Parse → statement map, Bind → portal + params, Execute queue, then completion on C/I/s, error skips until Sync, emit at ReadyForQuery. Named statements re-executed without a Parse are handled. Tested against real pg.
+- **Agent bug caught before it shipped:** patching only `Client.query` would read the request id inside pg-pool's callback, which runs in the context of whichever request _released_ the connection. An experiment showed 8/10 queries attributed to the wrong request with a 2-connection pool. Fix: tag eagerly in `Pool.query` too, and never double-tag. Good interview story about AsyncLocalStorage and callback-based libraries.
+- Named prepared statements stay untagged (pg forbids the same name with different text). Documented as a limitation.
+- Architecture call: the proxy is a separate long-lived process with an HTTP control port, not embedded in `deadheat run`. The app needs the DB at boot, and Week 6's delay injection needs a control channel anyway.
+- **First real report with the SQL interleaving:** 5 requests read capacity, all 5 count 0, all 5 insert. Exactly the playbook's report, from a real run.
+- A flaky e2e timeout appeared once (5s default) and didn't reproduce in 6 reruns. Raised the test timeout to 20s and noted it rather than ignoring it.
+- Overhead with extended decoding looks like +70–92µs p50, but the machine was loaded during the measurement. Re-measure on an idle machine.
+- 77 tests.

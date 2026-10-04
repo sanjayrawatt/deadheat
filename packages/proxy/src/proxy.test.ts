@@ -86,11 +86,62 @@ describe("proxy", () => {
     expect(queries()[0]).toMatchObject({ rows: 2, commandTags: ["SELECT 1", "SELECT 1"] });
   });
 
-  it("forwards the extended protocol transparently (decoded from Week 5)", async () => {
+  it("decodes extended-protocol queries: SQL, params and the first row", async () => {
     await withClient(async (c) => {
-      expect((await c.query("SELECT $1::int + 1 AS n", [41])).rows[0]).toEqual({ n: 42 });
+      expect((await c.query("SELECT $1::int + 1 AS n, $2::text AS s", [41, null])).rows[0]).toEqual(
+        {
+          n: 42,
+          s: null,
+        },
+      );
     });
-    expect(queries()).toHaveLength(0);
+    expect(queries()).toEqual([
+      expect.objectContaining({
+        protocol: "extended",
+        sql: "SELECT $1::int + 1 AS n, $2::text AS s",
+        params: ["41", null],
+        rows: 1,
+        firstRow: ["42", null],
+        commandTags: ["SELECT 1"],
+        txStatus: "I",
+      }),
+    ]);
+  });
+
+  it("follows named prepared statements across executions", async () => {
+    await withClient(async (c) => {
+      // pg sends Parse only the first time; the second run is just Bind + Execute.
+      await c.query({ name: "get-n", text: "SELECT $1::int AS n", values: [1] });
+      await c.query({ name: "get-n", text: "SELECT $1::int AS n", values: [2] });
+    });
+    expect(queries().map((q) => [q.sql, q.params, q.firstRow])).toEqual([
+      ["SELECT $1::int AS n", ["1"], ["1"]],
+      ["SELECT $1::int AS n", ["2"], ["2"]],
+    ]);
+  });
+
+  it("reports extended-protocol errors and transaction status", async () => {
+    await withClient(async (c) => {
+      await c.query("BEGIN");
+      await expect(c.query("INSERT INTO no_such_table VALUES ($1)", [1])).rejects.toThrow();
+      await c.query("ROLLBACK");
+    });
+    expect(queries().map((q) => [q.protocol, q.txStatus, q.error?.code])).toEqual([
+      ["simple", "T", undefined],
+      ["extended", "E", "42P01"],
+      ["simple", "I", undefined],
+    ]);
+  });
+
+  it("reads the agent's request id from the SQL comment and strips it", async () => {
+    await withClient(async (c) => {
+      await c.query("/* deadheat_rid=run-1.3.7 */ SELECT $1::int AS n", [5]);
+      await c.query("/* deadheat_rid=run-1.3.8 */ SELECT 1");
+    });
+    expect(queries().map((q) => [q.requestId, q.sql])).toEqual([
+      ["run-1.3.7", "SELECT $1::int AS n"],
+      ["run-1.3.8", "SELECT 1"],
+    ]);
   });
 
   it("refuses SSL so a client that prefers TLS falls back to plaintext", async () => {

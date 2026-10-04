@@ -1,7 +1,5 @@
 import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import {
-  cString,
-  errorFields,
   FrameDecoder,
   GSSENC_REQUEST,
   SSL_REQUEST,
@@ -9,40 +7,15 @@ import {
   startupParams,
   type Frame,
 } from "./protocol.js";
+import { QueryTracker, type ProxyEvent } from "./tracker.js";
 
-export type TxStatus = "I" | "T" | "E"; // idle, in transaction, failed transaction
-
-export interface ConnectionOpenEvent {
-  type: "connection-open";
-  connectionId: number;
-  user?: string;
-  database?: string;
-  applicationName?: string;
-}
-
-export interface QueryEvent {
-  type: "query";
-  connectionId: number;
-  protocol: "simple";
-  sql: string;
-  /** ms since the proxy started (performance.now()). */
-  startedAt: number;
-  durationMs: number;
-  rows: number;
-  /** One CommandComplete tag per statement, e.g. ["INSERT 0 1"]. */
-  commandTags: string[];
-  error?: { code: string; message: string };
-  /** Transaction status reported by ReadyForQuery when the query finished. */
-  txStatus: TxStatus;
-}
-
-export interface ConnectionCloseEvent {
-  type: "connection-close";
-  connectionId: number;
-  queries: number;
-}
-
-export type ProxyEvent = ConnectionOpenEvent | QueryEvent | ConnectionCloseEvent;
+export type {
+  ConnectionCloseEvent,
+  ConnectionOpenEvent,
+  ProxyEvent,
+  QueryEvent,
+  TxStatus,
+} from "./tracker.js";
 
 export interface ProxyOptions {
   upstream: { host: string; port: number };
@@ -153,70 +126,4 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
         server.close(() => resolve());
       }),
   };
-}
-
-interface Pending {
-  sql: string;
-  startedAt: number;
-  rows: number;
-  commandTags: string[];
-  error?: { code: string; message: string };
-}
-
-/** Follows one connection's messages and emits a QueryEvent per completed simple query. */
-class QueryTracker {
-  count = 0;
-  private pending: Pending | undefined;
-
-  constructor(
-    private readonly connectionId: number,
-    private readonly emit: (e: ProxyEvent) => void,
-  ) {}
-
-  frontend(frame: Frame): void {
-    if (frame.type === "Q") {
-      this.pending = {
-        sql: cString(frame.payload).value,
-        startedAt: performance.now(),
-        rows: 0,
-        commandTags: [],
-      };
-    }
-  }
-
-  backend(frame: Frame): void {
-    const q = this.pending;
-    switch (frame.type) {
-      case "D":
-        if (q) q.rows++;
-        break;
-      case "C":
-        q?.commandTags.push(cString(frame.payload).value);
-        break;
-      case "E":
-        if (q) {
-          const f = errorFields(frame.payload);
-          q.error = { code: f.C ?? "", message: f.M ?? "" };
-        }
-        break;
-      case "Z":
-        if (q) {
-          this.count++;
-          this.emit({
-            type: "query",
-            connectionId: this.connectionId,
-            protocol: "simple",
-            sql: q.sql,
-            startedAt: q.startedAt,
-            durationMs: performance.now() - q.startedAt,
-            rows: q.rows,
-            commandTags: q.commandTags,
-            ...(q.error ? { error: q.error } : {}),
-            txStatus: String.fromCharCode(frame.payload[0]!) as TxStatus,
-          });
-          this.pending = undefined;
-        }
-        break;
-    }
-  }
 }

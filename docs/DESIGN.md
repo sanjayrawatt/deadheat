@@ -118,10 +118,14 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
 - **Query tracker:** a per-connection state machine. `Q` opens a query; `D`/`C`/`E` accumulate rows, command tags and errors; `ReadyForQuery` closes it and reports the transaction status (`I`/`T`/`E`). Week 4 decodes the **simple** protocol. Extended-protocol messages are forwarded but not yet decoded.
 - **Overhead:** +30–45µs per round trip, 68% throughput ([BENCHMARKS.md §5](BENCHMARKS.md)).
 
-**Next (Week 5):**
+**Built in Week 5** (attribution):
 
-- **Extended protocol:** Parse/Bind/Execute/Sync. `pg` and every ORM use it for parameterised queries, so all of the demo apps' queries are still invisible to the tracker.
-- **Agent:** wraps `pg` so every query carries the HTTP request id as a SQL comment (sqlcommenter style), using AsyncLocalStorage. The proxy reads the tag and groups queries per request.
+- **Extended protocol** in the tracker: Parse stores statement → SQL, Bind maps portal → (SQL, text params), each Execute queues an execution, and DataRow/CommandComplete/EmptyQuery/PortalSuspended complete them in order. An ErrorResponse fails the head and the rest of the batch is skipped until Sync. Events are emitted at ReadyForQuery with the transaction status. The first result row is decoded as text, so the report can show `→ 0`.
+- **Agent** (`@deadheat/agent`): AsyncLocalStorage holds the request id from the `x-deadheat-rid` header, which the runner sets to `<runId>.<trial>.<index>`. `instrumentPg(pg)` prefixes `/* deadheat_rid=… */`. It patches **`Pool.query` as well as `Client.query`, tagging eagerly**, because when the pool is exhausted pg-pool runs a waiting query's callback from whichever request released a connection. With `Client.query` alone, 8 of 10 queries were attributed to the wrong request in a test. Fastify plugin (`onRequest` → `als.run(store, done)`) and Express middleware.
+- **Control channel:** `deadheat proxy` also serves `http://127.0.0.1:55434` (`/health`, `POST /take`). Its `QueryStore` keeps tagged queries by request id (TTL 2 min, cap 200k). `deadheat run --proxy <url>` collects each trial's queries after the HTTP responses arrive. That's safe, because the proxy records a query before forwarding its result to the app. The runner attaches them to `RequestTrace.queries`, and the report prints the SQL of the shown requests **merged by start time, which is the interleaving**.
+- The proxy stays a separate long-lived process (like the app) rather than running inside `deadheat run`. The app needs the database at boot, and Week 6's delay injection will reuse the same control channel.
+
+**Next (Weeks 6–7):** race-window widening via a learning trial (record which reads are followed by a write in the same request, then hold those reads' results), plus full trace recording. Replay and seeds move to Weeks 8–9, after the scheduler exists.
 
 ## 6. Report format
 
@@ -151,7 +155,7 @@ Exit code 1 on any violation, so it works in CI. A JSON copy of every run goes t
 3. **The proxy can't know at read time whether a write will follow.** For widening, either learn read→write fingerprints in a first, unwidened trial, or delay every read inside an explicit transaction.
 4. **False positives and false negatives.** An invariant that is wrong, or a setup that leaks state between trials, looks like a race. _Implemented:_ a pre-flight invariant check after setup (it must pass before firing). The opposite failure is also real: if no request reaches the app (wrong port, app down), the invariant trivially holds and the run looks green. _Implemented:_ a trial where every request errors aborts the run (exit 2). _Planned:_ one sequential control trial per run.
 5. **Overhead and the observer effect.** Deadheat must not change the timing it measures. Keep `sql` off the hot path and measure proxy overhead in BENCHMARKS (v1).
-6. **Prepared statements and the comment tag.** Tagging changes the query text, which can defeat prepared-statement caching in drivers. Needs checking in v1.
+6. **Prepared statements and the comment tag.** _Resolved (Week 5):_ the agent tags unnamed statements only. A named prepared statement (`{ name }` in pg) keeps its exact text, because pg rejects one name with two texts, so those queries are forwarded but unattributed. Most apps and ORMs use unnamed statements by default.
 7. ~~**Testing Deadheat itself.**~~ Resolved in Week 2: CI runs a Postgres service, and an end-to-end test runs the real runner against booking-api.
 
 ## 8. Alternatives considered

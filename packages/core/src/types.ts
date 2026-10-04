@@ -35,9 +35,36 @@ export interface Scenario {
   trials?: number;
 }
 
+/** One SQL query the app ran while serving a request (seen by the proxy). */
+export interface QueryRecord {
+  sql: string;
+  params?: (string | null)[];
+  rows: number;
+  /** Values of the first result row, as text. */
+  firstRow?: (string | null)[];
+  commandTags: string[];
+  error?: { code: string; message: string };
+  /** Proxy clock (performance.now() in the proxy process). Only comparable to other queries. */
+  startedAt: number;
+  durationMs: number;
+  /** Transaction status after the query: idle, in transaction, failed. */
+  txStatus: "I" | "T" | "E";
+}
+
+/** Where the runner gets each request's queries from (e.g. a running `deadheat proxy`). */
+export interface QueryLog {
+  /** Returns, and forgets, the queries recorded for these request ids. */
+  take(requestIds: readonly string[]): Promise<Record<string, QueryRecord[]>>;
+}
+
+/** Header carrying the request id; the agent puts it into the app's SQL. */
+export const REQUEST_ID_HEADER = "x-deadheat-rid";
+
 /** What happened to one request in a trial. Times are ms since the trial's fire started. */
 export interface RequestTrace {
   index: number;
+  /** `<runId>.<trial>.<index>`, sent as the x-deadheat-rid header. */
+  requestId?: string;
   method: string;
   url: string;
   sentAtMs: number;
@@ -47,6 +74,8 @@ export interface RequestTrace {
   /** Response body, truncated. */
   body?: string;
   error?: string;
+  /** The app's SQL for this request, in order. Present when a query log is attached. */
+  queries?: QueryRecord[];
 }
 
 export interface TrialResult {

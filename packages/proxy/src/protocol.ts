@@ -99,6 +99,88 @@ export function errorFields(payload: Buffer): Record<string, string> {
   return fields;
 }
 
+/** Parse: prepare a statement. */
+export function readParse(payload: Buffer): { name: string; sql: string } {
+  const name = cString(payload, 0);
+  const sql = cString(payload, name.next);
+  return { name: name.value, sql: sql.value };
+}
+
+const MAX_PARAM_CHARS = 200;
+
+/** One parameter or column value as text: null, the (truncated) text, or "<binary>". */
+function valueAt(buf: Buffer, pos: number, len: number, binary: boolean): string | null {
+  if (len === -1) return null;
+  if (binary) return "<binary>";
+  const text = buf.toString("utf8", pos, pos + len);
+  return text.length > MAX_PARAM_CHARS ? `${text.slice(0, MAX_PARAM_CHARS)}…` : text;
+}
+
+/** Format code for value `i` given a format-code list (none = all text, one = applies to all). */
+function formatOf(codes: number[], i: number): number {
+  if (codes.length === 0) return 0;
+  return codes.length === 1 ? codes[0]! : (codes[i] ?? 0);
+}
+
+export interface BindMessage {
+  portal: string;
+  statement: string;
+  params: (string | null)[];
+  resultFormats: number[];
+}
+
+/** Bind: attach parameter values to a prepared statement, creating a portal. */
+export function readBind(payload: Buffer): BindMessage {
+  const portal = cString(payload, 0);
+  const statement = cString(payload, portal.next);
+  let pos = statement.next;
+  const nFormats = payload.readInt16BE(pos);
+  pos += 2;
+  const formats: number[] = [];
+  for (let i = 0; i < nFormats; i++, pos += 2) formats.push(payload.readInt16BE(pos));
+  const nParams = payload.readInt16BE(pos);
+  pos += 2;
+  const params: (string | null)[] = [];
+  for (let i = 0; i < nParams; i++) {
+    const len = payload.readInt32BE(pos);
+    pos += 4;
+    params.push(valueAt(payload, pos, len, formatOf(formats, i) === 1));
+    if (len > 0) pos += len;
+  }
+  const nResult = payload.readInt16BE(pos);
+  pos += 2;
+  const resultFormats: number[] = [];
+  for (let i = 0; i < nResult; i++, pos += 2) resultFormats.push(payload.readInt16BE(pos));
+  return { portal: portal.value, statement: statement.value, params, resultFormats };
+}
+
+/** Execute: run a portal. */
+export function readExecute(payload: Buffer): { portal: string } {
+  return { portal: cString(payload, 0).value };
+}
+
+/** Close: drop a prepared statement ('S') or portal ('P'). */
+export function readClose(payload: Buffer): { kind: "S" | "P"; name: string } {
+  return {
+    kind: String.fromCharCode(payload[0]!) as "S" | "P",
+    name: cString(payload, 1).value,
+  };
+}
+
+/** DataRow column values as text (binary columns become "<binary>"). */
+export function readDataRow(payload: Buffer, resultFormats: number[] = []): (string | null)[] {
+  const n = payload.readInt16BE(0);
+  let pos = 2;
+  const values: (string | null)[] = [];
+  for (let i = 0; i < n; i++) {
+    const len = payload.readInt32BE(pos);
+    pos += 4;
+    values.push(valueAt(payload, pos, len, formatOf(resultFormats, i) === 1));
+    if (len > 0) pos += len;
+  }
+  return values;
+}
+
 /** Human-readable names, for logs and traces. */
 export const FRONTEND_MESSAGES: Record<string, string> = {
   startup: "Startup",

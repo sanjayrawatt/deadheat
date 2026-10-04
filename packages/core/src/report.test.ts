@@ -44,6 +44,39 @@ describe("formatRun", () => {
     expect(formatRun({ ...base, aborted: "setup is broken" })).toContain("setup is broken");
   });
 
+  it("shows the SQL of the listed requests merged by start time", () => {
+    const q = (sql: string, startedAt: number, extra: object = {}) => ({
+      sql,
+      rows: 1,
+      commandTags: ["SELECT 1"],
+      startedAt,
+      durationMs: 1,
+      txStatus: "I" as const,
+      ...extra,
+    });
+    const t = trial(2, false);
+    t.requests[1]!.queries = [
+      q("SELECT COUNT(*) FROM bookings WHERE slot_id = $1", 10, { params: ["1"], firstRow: ["0"] }),
+      q("INSERT INTO bookings (slot_id, user_id) VALUES ($1, $2)", 30, {
+        params: ["1", "2"],
+        rows: 0,
+        commandTags: ["INSERT 0 1"],
+      }),
+    ];
+    t.requests[2]!.queries = [
+      q("SELECT COUNT(*) FROM bookings WHERE slot_id = $1", 20, { params: ["1"], firstRow: ["0"] }),
+    ];
+    const text = formatRun({ ...base, trials: [t] });
+    expect(text).toContain(
+      [
+        "    SQL, in the order it ran:",
+        "      #1   SELECT COUNT(*) FROM bookings WHERE slot_id = $1  [1] → 0",
+        "      #2   SELECT COUNT(*) FROM bookings WHERE slot_id = $1  [1] → 0",
+        "      #1   INSERT INTO bookings (slot_id, user_id) VALUES ($1, $2)  [1, 2] → INSERT 0 1",
+      ].join("\n"),
+    );
+  });
+
   it("truncates long request lists", () => {
     expect(formatRun(base, { maxRequests: 1 })).toContain("… 2 more requests");
   });

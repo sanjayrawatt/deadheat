@@ -1,3 +1,4 @@
+import { registerFastify } from "@deadheat/agent";
 import Fastify, { type FastifyInstance } from "fastify";
 import { pool } from "./db.js";
 import { variants, type VariantName } from "./variants.js";
@@ -14,6 +15,7 @@ interface ResetBody {
 
 export function buildApp(variant: VariantName): FastifyInstance {
   const app = Fastify({ logger: process.env.LOG_LEVEL ? { level: process.env.LOG_LEVEL } : false });
+  registerFastify(app);
   const book = variants[variant];
 
   app.post<{ Body: BookingBody }>(
