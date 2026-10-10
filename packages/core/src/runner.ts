@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Sql } from "postgres";
+import { learnDecisionReads } from "./widen.js";
 import {
   REQUEST_ID_HEADER,
   type QueryLog,
@@ -19,6 +20,12 @@ export interface RunOptions {
   baseUrl?: string;
   /** Attaches the app's SQL to each request trace (needs the agent in the app). */
   queryLog?: QueryLog;
+  /**
+   * Race-window widening (needs a queryLog that supports holds, i.e. `deadheat proxy`).
+   * Trial 1 runs as-is and teaches the runner which reads each request acts on; from then on
+   * the proxy holds those reads' results for `holdMs`.
+   */
+  widen?: { holdMs: number };
   /** Called after every trial, e.g. to print progress. */
   onTrial?: (result: TrialResult) => void;
 }
@@ -55,47 +62,66 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   };
   const runStart = performance.now();
 
-  for (let trial = 1; trial <= total; trial++) {
-    const trialStart = performance.now();
-    await scenario.setup?.({ sql });
+  const { queryLog, widen } = options;
+  if (widen && !queryLog?.setHolds) {
+    throw new Error("widening needs a query log that can hold reads (deadheat proxy)");
+  }
+  const learned = new Set<string>();
 
-    const before = await scenario.invariant({ sql, responses: [] });
-    if (before !== true) {
-      result.aborted = `Trial ${trial}: the invariant already fails after setup, before any request was sent ("${before}"). Fix the scenario's setup or invariant.`;
-      break;
+  try {
+    for (let trial = 1; trial <= total; trial++) {
+      const trialStart = performance.now();
+      await scenario.setup?.({ sql });
+
+      const before = await scenario.invariant({ sql, responses: [] });
+      if (before !== true) {
+        result.aborted = `Trial ${trial}: the invariant already fails after setup, before any request was sent ("${before}"). Fix the scenario's setup or invariant.`;
+        break;
+      }
+
+      const baseUrl = options.baseUrl ?? scenario.baseUrl;
+      const ids = specs.map((_, i) => `${result.runId}.${trial}.${i}`);
+      const tagged = specs.map((spec, i) => ({
+        ...spec,
+        headers: { ...spec.headers, [REQUEST_ID_HEADER]: ids[i]! },
+      }));
+      const requests = await strategy.fire(baseUrl, tagged);
+      requests.forEach((r) => (r.requestId = ids[r.index]!));
+
+      // If nothing reached the app, the invariant trivially holds, and a green result would
+      // be a lie (e.g. a wrong port in CI). Stop instead.
+      if (requests.length && requests.every((r) => r.error !== undefined)) {
+        result.aborted = `Trial ${trial}: none of the ${requests.length} requests got a response (first error: ${requests[0]!.error}). Is the app running at ${baseUrl}?`;
+        break;
+      }
+      if (queryLog) {
+        const byId = await queryLog.take(ids);
+        for (const r of requests) r.queries = byId[r.requestId!] ?? [];
+      }
+      const verdict = await scenario.invariant({ sql, responses: requests });
+
+      const trialResult: TrialResult = {
+        trial,
+        passed: verdict === true,
+        ...(verdict === true ? {} : { violation: verdict }),
+        durationMs: performance.now() - trialStart,
+        requests,
+      };
+      if (!trialResult.passed) result.violations++;
+      result.trials.push(trialResult);
+      options.onTrial?.(trialResult);
+
+      if (widen) {
+        const before = learned.size;
+        for (const f of learnDecisionReads(trialResult)) learned.add(f);
+        if (learned.size > before) {
+          result.widen = { holdMs: widen.holdMs, fingerprints: [...learned] };
+          await queryLog!.setHolds!(result.widen);
+        }
+      }
     }
-
-    const baseUrl = options.baseUrl ?? scenario.baseUrl;
-    const ids = specs.map((_, i) => `${result.runId}.${trial}.${i}`);
-    const tagged = specs.map((spec, i) => ({
-      ...spec,
-      headers: { ...spec.headers, [REQUEST_ID_HEADER]: ids[i]! },
-    }));
-    const requests = await strategy.fire(baseUrl, tagged);
-    requests.forEach((r) => (r.requestId = ids[r.index]!));
-
-    // If nothing reached the app, the invariant trivially holds, and a green result would
-    // be a lie (e.g. a wrong port in CI). Stop instead.
-    if (requests.length && requests.every((r) => r.error !== undefined)) {
-      result.aborted = `Trial ${trial}: none of the ${requests.length} requests got a response (first error: ${requests[0]!.error}). Is the app running at ${baseUrl}?`;
-      break;
-    }
-    if (options.queryLog) {
-      const byId = await options.queryLog.take(ids);
-      for (const r of requests) r.queries = byId[r.requestId!] ?? [];
-    }
-    const verdict = await scenario.invariant({ sql, responses: requests });
-
-    const trialResult: TrialResult = {
-      trial,
-      passed: verdict === true,
-      ...(verdict === true ? {} : { violation: verdict }),
-      durationMs: performance.now() - trialStart,
-      requests,
-    };
-    if (!trialResult.passed) result.violations++;
-    result.trials.push(trialResult);
-    options.onTrial?.(trialResult);
+  } finally {
+    if (widen) await queryLog!.setHolds!(null);
   }
 
   result.durationMs = performance.now() - runStart;

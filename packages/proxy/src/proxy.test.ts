@@ -169,3 +169,62 @@ describe("proxy", () => {
     expect(queries()).toHaveLength(50);
   });
 });
+
+describe("holds (race-window widening)", () => {
+  async function timed(c: pg.Client, sql: string, values?: unknown[]) {
+    const t = performance.now();
+    const res = await c.query(sql, values);
+    return { ms: performance.now() - t, rows: res.rows };
+  }
+
+  it("holds the result of a matching tagged read, and nothing else", async () => {
+    proxy.setHolds({ holdMs: 150, fingerprints: ["SELECT $1::int AS n"] });
+    try {
+      await withClient(async (c) => {
+        const held = await timed(c, "/* deadheat_rid=r.1.0 */ SELECT $1::int AS n", [7]);
+        expect(held.ms).toBeGreaterThanOrEqual(145);
+        expect(held.rows).toEqual([{ n: 7 }]); // the held result arrives intact
+
+        const untagged = await timed(c, "SELECT $1::int AS n", [8]);
+        const otherQuery = await timed(c, "/* deadheat_rid=r.1.0 */ SELECT $1::int AS m", [9]);
+        expect(untagged.ms).toBeLessThan(100);
+        expect(otherQuery.ms).toBeLessThan(100);
+      });
+    } finally {
+      proxy.setHolds(null);
+    }
+    const held = queries().filter((q) => q.heldMs);
+    expect(held.map((q) => [q.sql, q.heldMs])).toEqual([["SELECT $1::int AS n", 150]]);
+  });
+
+  it("matches literal-only differences through the fingerprint", async () => {
+    proxy.setHolds({ holdMs: 120, fingerprints: ["SELECT ? AS lit"] });
+    try {
+      await withClient(async (c) => {
+        expect(
+          (await timed(c, "/* deadheat_rid=r.2.0 */ SELECT 41 AS lit")).ms,
+        ).toBeGreaterThanOrEqual(115);
+      });
+    } finally {
+      proxy.setHolds(null);
+    }
+  });
+
+  it("keeps a connection's later results in order behind a held one", async () => {
+    proxy.setHolds({ holdMs: 100, fingerprints: ["SELECT $1::int AS n"] });
+    try {
+      await withClient(async (c) => {
+        // pg pipelines these on one connection; the second must not overtake the held first.
+        const [a, b] = await Promise.all([
+          c.query("/* deadheat_rid=r.3.0 */ SELECT $1::int AS n", [1]),
+          c.query("SELECT $1::int AS m", [2]),
+        ]);
+        expect(a.rows).toEqual([{ n: 1 }]);
+        expect(b.rows).toEqual([{ m: 2 }]);
+      });
+    } finally {
+      proxy.setHolds(null);
+    }
+    expect(proxy.holds).toBeNull();
+  });
+});

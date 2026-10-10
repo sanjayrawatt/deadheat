@@ -125,7 +125,15 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
 - **Control channel:** `deadheat proxy` also serves `http://127.0.0.1:55434` (`/health`, `POST /take`). Its `QueryStore` keeps tagged queries by request id (TTL 2 min, cap 200k). `deadheat run --proxy <url>` collects each trial's queries after the HTTP responses arrive. That's safe, because the proxy records a query before forwarding its result to the app. The runner attaches them to `RequestTrace.queries`, and the report prints the SQL of the shown requests **merged by start time, which is the interleaving**.
 - The proxy stays a separate long-lived process (like the app) rather than running inside `deadheat run`. The app needs the database at boot, and Week 6's delay injection will reuse the same control channel.
 
-**Next (Weeks 6–7):** race-window widening via a learning trial (record which reads are followed by a write in the same request, then hold those reads' results), plus full trace recording. Replay and seeds move to Weeks 8–9, after the scheduler exists.
+**Built in Week 6** (race-window widening, `deadheat run --widen <ms>`):
+
+- **Learning trial.** After each trial the runner looks at every request's SQL. A read followed later _in the same request_ by a write is a **decision read**, the value check-then-act code trusts. Its fingerprint (literals → `?`, whitespace collapsed) joins the hold list. Trial 1 always runs unwidened, and new decision reads seen later are added as they appear.
+- **Holds in the proxy.** The runner sends the list over the control channel (`PUT /holds`). Per connection, server→client frames pass through an outbox. When the response to a matching _tagged_ query starts arriving, the outbox pauses until `now + holdMs`, and everything behind it waits, so ordering is preserved. Untagged traffic is never held. `DELETE /holds` runs in a `finally` when the run ends.
+- **Why this widens the window:** the request's write can't start until its read's result arrives. Holding every decision read for 200ms means all concurrent requests have read before any of them writes, whatever the network jitter did to their arrival times.
+- **Report:** a `Widened:` line lists the held reads, each held query shows `(held Nms)`, and a **`Pattern: check-then-act`** hint appears when ≥2 successful requests ran the same decision read and all those reads started before the first of their writes.
+- **Boundary:** a single-statement race (`INSERT … SELECT … WHERE count < capacity`) has no separate read, so nothing is learned and nothing is held. Read-hold widening can't help there. v2's scheduler targets it differently: it can hold each request's statement at the proxy and release them together (a barrier at the database), so their snapshots overlap no matter how the HTTP requests arrived.
+
+**Next (Week 7):** record the full trace of every run (all queries, with timings and hold info) under `.deadheat/runs/`, ready for the scheduler and replay in Weeks 8–9.
 
 ## 6. Report format
 

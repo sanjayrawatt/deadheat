@@ -134,3 +134,39 @@ Throughput (10 connections, 4000 extended queries): direct 23,314 q/s, proxy 15,
 ### 5b. After adding extended-protocol decoding (2026-10-05)
 
 The tracker now decodes Parse/Bind/Execute/DataRow (parameters and the first row) for every query. Re-running `corepack pnpm proxy-overhead` gave extended-query p50 overheads of **+70 to +92µs** (vs +40µs before) and throughput of 38–60% of direct. **These runs were on a loaded machine.** Direct-to-Postgres p90/p99 were 2–5× worse than in §5, so the numbers are indicative only. Re-measure on an idle machine before quoting them. `proxy-overhead` now runs the proxy with `--quiet` by default (no per-query log line, as under `deadheat run --proxy`). Pass `--log` to include logging.
+
+## 6. Race-window widening (2026-10-10)
+
+Booking API through `deadheat proxy` (with the agent), scenario `booking-oversell`, 100 trials per cell. Client→API latency 10ms ± jitter. `sync` uses settle 50ms. The widen column learns its decision reads in trial 1, then holds them for 200ms.
+
+```bash
+docker compose up -d --wait && corepack pnpm build
+cd benchmarks && corepack pnpm widen-hit-rate                            # naive variant
+cd benchmarks && corepack pnpm widen-hit-rate --variant single-statement
+```
+
+`naive` variant (separate check and insert, so it has a decision read):
+
+| N   | jitter | naive | sync | **sync + widen 200ms** |
+| --- | ------ | ----- | ---- | ---------------------- |
+| 2   | 0ms    | 99%   | 100% | 100%                   |
+| 2   | 10ms   | 33%   | 36%  | **100%**               |
+| 20  | 0ms    | 100%  | 100% | 100%                   |
+| 20  | 10ms   | 66%   | 95%  | **100%**               |
+
+`single-statement` variant (`INSERT … SELECT … WHERE count < capacity`, no separate read):
+
+| N   | jitter | naive | sync | sync + widen 200ms |
+| --- | ------ | ----- | ---- | ------------------ |
+| 2   | 0ms    | 98%   | 98%  | 98%                |
+| 2   | 10ms   | 16%   | 29%  | 32%                |
+| 20  | 0ms    | 98%   | 99%  | 99%                |
+| 20  | 10ms   | 74%   | 84%  | 84%                |
+
+What this shows:
+
+1. **Widening makes the check-then-act race deterministic under jitter.** With 2 users and 10ms jitter, burst strategies find it about a third of the time; holding the decision read finds it on every trial.
+2. **It does nothing for the single-statement race**, as designed: no decision read is learned, so the widen column equals sync within noise. That race needs v2's statement-level control.
+3. More concurrent requests raise burst-only hit rates (more chances for two to land together), but only widening reaches 100%.
+
+**Why this doesn't use Toxiproxy (unlike §3):** the first run aborted at N=20. A `sync` trial's 20 fresh connections to Toxiproxy's published port sometimes never reached the container. The client saw them as connected, the app saw nothing, and Toxiproxy logged no accept, so the trial hung for 30s. It happened with and without `deadheat proxy` in the path, never without Toxiproxy, and a 200ms pause between trials didn't help (Docker Desktop 4.57, macOS). `naive` reuses keep-alive connections and wasn't affected. The benchmark now uses `benchmarks/jitter-proxy.ts`, a host-side proxy with the same latency ± jitter on client→API (order kept); 900 N=20 trials ran without a hang. Because the jitter source differs, these numbers aren't directly comparable with §3. Wallet widening isn't measured yet.

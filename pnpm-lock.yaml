@@ -41,6 +41,9 @@ importers:
       '@deadheat/core':
         specifier: workspace:*
         version: link:../packages/core
+      deadheat:
+        specifier: workspace:*
+        version: link:../packages/cli
       pg:
         specifier: ^8.23.1
         version: 8.23.1
@@ -155,6 +158,10 @@ importers:
         version: 4.23.15
 
   packages/proxy:
+    dependencies:
+      '@deadheat/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@types/pg':
         specifier: ^8.23.1

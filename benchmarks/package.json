@@ -9,12 +9,14 @@
     "arrival-spread": "tsx arrival-spread.ts",
     "jitter-hit-rate": "tsx jitter-hit-rate.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "proxy-overhead": "tsx proxy-overhead.ts"
+    "proxy-overhead": "tsx proxy-overhead.ts",
+    "widen-hit-rate": "tsx widen-hit-rate.ts"
   },
   "dependencies": {
     "@deadheat/core": "workspace:*",
     "pg": "^8.23.1",
-    "postgres": "^3.4.9"
+    "postgres": "^3.4.9",
+    "deadheat": "workspace:*"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1"

@@ -68,3 +68,21 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - A flaky e2e timeout appeared once (5s default) and didn't reproduce in 6 reruns. Raised the test timeout to 20s and noted it rather than ignoring it.
 - Overhead with extended decoding looks like +70–92µs p50, but the machine was loaded during the measurement. Re-measure on an idle machine.
 - 77 tests.
+
+## Week 6 (Nov 2 – Nov 8, 2026)
+
+### 2026-10-05: race-window widening
+
+- **Learning trial instead of guessing:** the proxy can't know at read time whether a write will follow, but the runner can see it afterwards in each request's SQL. A read followed by a write in the same request is a "decision read". Fingerprints (literals → `?`) of those reads become hold rules from trial 2 on.
+- **Holds** are an outbox per proxy connection. A matching tagged query's response pauses it for `holdMs`, and later frames queue behind. That's why I insisted on frame-level forwarding in Week 4: this was a ~30-line change on top of it.
+- Holds are only applied to queries carrying a request tag, so other traffic through the proxy isn't slowed, and they're always cleared in a `finally`.
+- Report now prints `Widened: …`, `(held 200ms)` per held read, and **`Pattern: check-then-act`** with the usual fixes, like the playbook's target report.
+- **Honest limit, covered by a test:** the single-statement booking variant learns nothing, because there's no separate read to hold. That race needs v2's statement-ordering control.
+- First benchmark cell: 2 concurrent users, 10ms network jitter. naive 35%, sync 40%, **sync + widen 100%**.
+- 100 tests.
+
+### 2026-10-10: widening benchmark, and a hang that wasn't ours
+
+- The full widening benchmark aborted at N=20: a `sync` trial got no response from any of its 20 requests for 30s. Isolated step by step: it happened only through Toxiproxy in Docker, with or without `deadheat proxy`. During the hang the client held 20 established connections, the app had none, and Toxiproxy never logged accepting them. Docker Desktop's port forwarder swallowed the burst. Pacing trials didn't help.
+- Replaced Toxiproxy in the widen benchmark with a ~50-line host-side jitter proxy. 900 N=20 trials, no hang.
+- Results ([BENCHMARKS.md §6](docs/BENCHMARKS.md)): naive variant at 10ms jitter goes from 33–36% (N=2) to **100%** with widening. The single-statement variant stays where sync is, as expected.

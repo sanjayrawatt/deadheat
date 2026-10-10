@@ -58,7 +58,11 @@ describe("control server", () => {
     control = await startControl({ store });
     const base = `http://127.0.0.1:${control.port}`;
 
-    expect(await (await fetch(`${base}/health`)).json()).toEqual({ ok: true, queries: 1 });
+    expect(await (await fetch(`${base}/health`)).json()).toEqual({
+      ok: true,
+      queries: 1,
+      holds: null,
+    });
     const res = await fetch(`${base}/take`, {
       method: "POST",
       body: JSON.stringify({ requestIds: ["r1"] }),
@@ -68,5 +72,36 @@ describe("control server", () => {
 
     const bad = await fetch(`${base}/take`, { method: "POST", body: "{}" });
     expect(bad.status).toBe(400);
+  });
+});
+
+describe("control server holds", () => {
+  let control: ControlServer | undefined;
+  afterEach(() => control?.close());
+
+  it("sets, reports and clears holds", async () => {
+    let current: { holdMs: number; fingerprints: string[] } | null = null;
+    const holds = {
+      setHolds: (r: typeof current) => void (current = r),
+      get holds() {
+        return current;
+      },
+    };
+    control = await startControl({ store: new QueryStore(), holds });
+    const base = `http://127.0.0.1:${control.port}`;
+
+    const put = await fetch(`${base}/holds`, {
+      method: "PUT",
+      body: JSON.stringify({ holdMs: 200, fingerprints: ["SELECT 1"] }),
+    });
+    expect(put.status).toBe(200);
+    expect(((await (await fetch(`${base}/health`)).json()) as { holds: unknown }).holds).toEqual({
+      holdMs: 200,
+      fingerprints: ["SELECT 1"],
+    });
+    const bad = await fetch(`${base}/holds`, { method: "PUT", body: '{"holdMs": -1}' });
+    expect(bad.status).toBe(400);
+    await fetch(`${base}/holds`, { method: "DELETE" });
+    expect(current).toBeNull();
   });
 });

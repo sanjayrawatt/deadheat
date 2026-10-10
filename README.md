@@ -80,6 +80,8 @@ node packages/cli/dist/bin.js run scenarios/booking-oversell.ts --proxy http://1
 
 Both requests counted 0 bookings before either inserted: check-then-act on a stale read. (Trimmed from a real run of 5 shown requests.) Without `--proxy`, `deadheat proxy` on its own prints a live log of every query.
 
+**Make rare races common:** add `--widen 200`. Trial 1 learns which reads each request acts on, and from then on the proxy holds those reads' results for 200ms. Every concurrent request then reads before any of them writes, even when network jitter spreads their arrival out (numbers in [BENCHMARKS.md §6](docs/BENCHMARKS.md)).
+
 ## Demo apps
 
 | App                                  | Port | Variants (`*_VARIANT` env)                         | Invariant it breaks          |

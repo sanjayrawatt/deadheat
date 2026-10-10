@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { HoldRules } from "./proxy.js";
 import type { QueryEvent } from "./tracker.js";
 
 /**
@@ -69,9 +70,12 @@ export interface ControlServer {
  * The runner's channel to a running proxy (localhost only):
  *   GET  /health                       → { ok: true, queries }
  *   POST /take  { requestIds: [...] }  → { queries: { [requestId]: QueryEvent[] } }
+ *   PUT  /holds { holdMs, fingerprints } → hold matching reads' results (widening)
+ *   DELETE /holds                      → stop holding
  */
 export async function startControl(options: {
   store: QueryStore;
+  holds?: { setHolds(rules: HoldRules | null): void; readonly holds: HoldRules | null };
   port?: number;
   host?: string;
 }): Promise<ControlServer> {
@@ -82,7 +86,26 @@ export async function startControl(options: {
     };
     try {
       if (req.method === "GET" && req.url === "/health") {
-        return send(200, { ok: true, queries: store.size });
+        return send(200, { ok: true, queries: store.size, holds: options.holds?.holds ?? null });
+      }
+      if (req.url === "/holds" && options.holds) {
+        if (req.method === "DELETE") {
+          options.holds.setHolds(null);
+          return send(200, { holds: null });
+        }
+        if (req.method === "PUT") {
+          const body = JSON.parse(await readBody(req)) as Partial<HoldRules>;
+          const ok =
+            typeof body.holdMs === "number" &&
+            body.holdMs >= 0 &&
+            body.holdMs <= 60_000 &&
+            Array.isArray(body.fingerprints) &&
+            body.fingerprints.every((f) => typeof f === "string");
+          if (!ok)
+            return send(400, { error: "expected { holdMs: 0-60000, fingerprints: string[] }" });
+          options.holds.setHolds({ holdMs: body.holdMs!, fingerprints: body.fingerprints! });
+          return send(200, { holds: options.holds.holds });
+        }
       }
       if (req.method === "POST" && req.url === "/take") {
         const body = JSON.parse(await readBody(req)) as { requestIds?: unknown };

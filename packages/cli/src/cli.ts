@@ -60,6 +60,9 @@ Run options:
   --database-url <url>   database for setup/invariant (or env DEADHEAT_DATABASE_URL)
   --proxy <url>          a running \`deadheat proxy\` control URL (e.g. http://127.0.0.1:${DEFAULT_CONTROL_PORT});
                          adds each request's SQL to the report (the app needs @deadheat/agent)
+  --widen <ms>           with --proxy: after trial 1, hold the results of the reads each request
+                         acts on (decision reads) for <ms>, so concurrent requests all read
+                         before any writes. Makes rare races show up on almost every trial
   --no-save              don't write the run to .deadheat/runs/<run-id>.json
   --verbose              list every violating trial in full
 
@@ -91,6 +94,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         "base-url": { type: "string" },
         "database-url": { type: "string" },
         proxy: { type: "string" },
+        widen: { type: "string" },
         save: { type: "boolean", default: true },
         verbose: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -131,6 +135,15 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     if (!Number.isInteger(trials) || trials < 1) return fail("--trials must be an integer >= 1");
   }
 
+  let widenMs: number | undefined;
+  if (values.widen !== undefined) {
+    widenMs = Number(values.widen);
+    if (!values.proxy) return fail("--widen needs --proxy (the proxy is what holds the reads)");
+    if (!Number.isInteger(widenMs) || widenMs < 1 || widenMs > 60_000) {
+      return fail("--widen must be an integer between 1 and 60000 (ms)");
+    }
+  }
+
   const databaseUrl = values["database-url"] ?? io.env.DEADHEAT_DATABASE_URL;
   if (!databaseUrl) {
     return fail("no database: pass --database-url or set DEADHEAT_DATABASE_URL");
@@ -160,6 +173,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       ...(trials !== undefined ? { trials } : {}),
       ...(values["base-url"] ? { baseUrl: values["base-url"] } : {}),
       ...(queryLog ? { queryLog } : {}),
+      ...(widenMs ? { widen: { holdMs: widenMs } } : {}),
       onTrial: (t) => io.err(t.passed ? "." : "x"),
     });
     io.err("\n");
@@ -249,7 +263,7 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
         if (!values.quiet) io.out(`${formatProxyEvent(e)}\n`);
       },
     });
-    control = await startControl({ store, port: controlPort });
+    control = await startControl({ store, port: controlPort, holds: proxy });
   } catch (err) {
     await proxy?.close();
     return fail(`could not listen: ${(err as Error).message}`);
@@ -287,6 +301,14 @@ export async function httpQueryLog(controlUrl: string): Promise<QueryLog> {
       for (const [id, events] of Object.entries(queries)) out[id] = events.map(toRecord);
       return out;
     },
+    async setHolds(holds) {
+      const res = await fetch(`${base}/holds`, {
+        method: holds ? "PUT" : "DELETE",
+        headers: { "content-type": "application/json" },
+        ...(holds ? { body: JSON.stringify(holds) } : {}),
+      });
+      if (!res.ok) throw new Error(`deadheat proxy /holds returned ${res.status}`);
+    },
   };
 }
 
@@ -301,6 +323,7 @@ function toRecord(e: QueryEvent): QueryRecord {
     startedAt: e.startedAt,
     durationMs: e.durationMs,
     txStatus: e.txStatus,
+    ...(e.heldMs ? { heldMs: e.heldMs } : {}),
   };
 }
 
@@ -327,7 +350,8 @@ export function formatProxyEvent(e: ProxyEvent): string {
         ? `ERROR ${e.error.code} ${e.error.message}`
         : `${e.commandTags.join(", ")}${e.rows ? ` (${e.rows} ${e.rows === 1 ? "row" : "rows"})` : ""}`;
       const rid = e.requestId ? ` {${e.requestId}}` : "";
-      return `${id} ${e.durationMs.toFixed(1).padStart(7)}ms [${e.txStatus}] ${shown} → ${outcome}${rid}`;
+      const held = e.heldMs ? ` (held ${e.heldMs}ms)` : "";
+      return `${id} ${e.durationMs.toFixed(1).padStart(7)}ms [${e.txStatus}] ${shown} → ${outcome}${held}${rid}`;
     }
   }
 }

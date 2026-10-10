@@ -40,6 +40,8 @@ export interface QueryEvent {
   error?: { code: string; message: string };
   /** Transaction status reported by the ReadyForQuery that followed. */
   txStatus: TxStatus;
+  /** How long the proxy held this query's result back (race-window widening). */
+  heldMs?: number;
 }
 
 export interface ConnectionCloseEvent {
@@ -69,6 +71,17 @@ interface Running {
   firstRow?: (string | null)[];
   commandTags: string[];
   error?: { code: string; message: string };
+  /** Set once the proxy has decided whether to hold this query's result. */
+  holdDecided?: boolean;
+  heldMs?: number;
+}
+
+/** The query whose response is arriving now, as the proxy's hold logic sees it. */
+export interface Responding {
+  sql: string;
+  requestId?: string;
+  /** Decide once per query: returns the hold in ms, or 0. */
+  decide(holdFor: (sql: string, requestId: string | undefined) => number): number;
 }
 
 /**
@@ -182,6 +195,24 @@ export class QueryTracker {
     }
   }
 
+  /** The query the next backend frame belongs to, if any. */
+  responding(): Responding | undefined {
+    const r = this.simple ?? this.queue[0];
+    if (!r) return undefined;
+    const { sql, requestId } = splitRequestTag(r.sql);
+    return {
+      sql,
+      ...(requestId ? { requestId } : {}),
+      decide(holdFor) {
+        if (r.holdDecided) return 0;
+        r.holdDecided = true;
+        const ms = holdFor(sql, requestId);
+        if (ms > 0) r.heldMs = ms;
+        return ms;
+      },
+    };
+  }
+
   private finishHead(): void {
     const head = this.queue.shift();
     if (!head) return;
@@ -206,6 +237,7 @@ export class QueryTracker {
       commandTags: r.commandTags,
       ...(r.error ? { error: r.error } : {}),
       txStatus,
+      ...(r.heldMs ? { heldMs: r.heldMs } : {}),
     });
   }
 }

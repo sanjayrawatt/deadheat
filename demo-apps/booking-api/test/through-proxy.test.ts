@@ -28,6 +28,7 @@ const store = new QueryStore();
 let app: FastifyInstance;
 let baseUrl: string;
 let closePool: () => Promise<void>;
+let buildAppFn: typeof import("../src/app.js").buildApp;
 
 beforeAll(async () => {
   const upstream = new URL(DIRECT);
@@ -38,7 +39,7 @@ beforeAll(async () => {
       if (e.type === "query") store.add(e);
     },
   });
-  control = await startControl({ store });
+  control = await startControl({ store, holds: proxy });
   const viaProxy = new URL(DIRECT);
   viaProxy.hostname = "127.0.0.1";
   viaProxy.port = String(proxy.port);
@@ -47,6 +48,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = viaProxy.toString();
   const { applySchema, pool } = await import("../src/db.js");
   const { buildApp } = await import("../src/app.js");
+  buildAppFn = buildApp;
   closePool = () => pool.end();
   await applySchema();
   app = buildApp("naive");
@@ -111,5 +113,57 @@ describe("booking-api through the proxy", () => {
     // The runner collected (and so removed) every query of this run from the proxy's store.
     const ids = run.trials.flatMap((t) => t.requests.map((r) => r.requestId!));
     expect(store.take(ids)).toEqual({});
+  });
+
+  it("widens: learns the decision reads in trial 1, then holds them", async () => {
+    const scenario = await loadScenario(scenarioPath);
+    const queryLog = await httpQueryLog(`http://127.0.0.1:${control.port}`);
+    const run = await runScenario(scenario, {
+      strategy: naive,
+      sql,
+      baseUrl,
+      trials: 4,
+      queryLog,
+      widen: { holdMs: 100 },
+    });
+
+    expect(run.widen?.fingerprints.sort()).toEqual([
+      "SELECT COUNT(*)::int AS count FROM bookings WHERE slot_id = $1",
+      "SELECT capacity FROM slots WHERE id = $1",
+    ]);
+    const held = (t: number) =>
+      run.trials[t]!.requests.flatMap((r) => r.queries!).filter((q) => q.heldMs === 100);
+    expect(held(0)).toHaveLength(0); // trial 1 learns, unwidened
+    expect(held(1).length).toBe(20 * 2); // then both reads of every request are held
+    expect(run.violations).toBeGreaterThan(0);
+    expect(proxy.holds).toBeNull(); // cleared at the end of the run
+
+    const report = formatRun(run);
+    expect(report).toContain("Widened: held the results of 2 decision read(s) for 100ms");
+    expect(report).toContain("Pattern: check-then-act");
+    expect(report).toMatch(/→ 0 {2}\(held 100ms\)/);
+  });
+
+  it("learns nothing from the single-statement variant: no separate read to hold", async () => {
+    const single = buildAppFn("single-statement");
+    const singleUrl = await single.listen({ port: 0, host: "127.0.0.1" });
+    try {
+      const scenario = await loadScenario(scenarioPath);
+      const queryLog = await httpQueryLog(`http://127.0.0.1:${control.port}`);
+      const run = await runScenario(scenario, {
+        strategy: naive,
+        sql,
+        baseUrl: singleUrl,
+        trials: 3,
+        queryLog,
+        widen: { holdMs: 100 },
+      });
+      expect(run.widen).toBeUndefined();
+      expect(
+        run.trials.flatMap((t) => t.requests.flatMap((r) => r.queries!)).some((q) => q.heldMs),
+      ).toBe(false);
+    } finally {
+      await single.close();
+    }
   });
 });

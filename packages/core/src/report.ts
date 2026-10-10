@@ -1,4 +1,5 @@
 import type { QueryRecord, RequestTrace, RunResult, TrialResult } from "./types.js";
+import { staleReadPattern } from "./widen.js";
 
 export interface ReportOptions {
   /** How many violating trials to show in detail. */
@@ -23,6 +24,13 @@ export function formatRun(run: RunResult, options: ReportOptions = {}): string {
   lines.push(
     `${mark} ${run.scenario}: ${run.violations}/${total} trials violated (${rate}%), strategy=${run.strategy}, ${run.runId}`,
   );
+
+  if (run.widen) {
+    lines.push(
+      `  Widened: held the results of ${run.widen.fingerprints.length} decision read(s) for ${run.widen.holdMs}ms`,
+      ...run.widen.fingerprints.map((f) => `    ${oneLine(f)}`),
+    );
+  }
 
   const failed = run.trials.filter((t) => !t.passed);
   for (const trial of failed.slice(0, maxViolations)) {
@@ -60,6 +68,16 @@ function formatTrial(trial: TrialResult, maxRequests: number): string[] {
     lines.push(`    … ${ordered.length - maxRequests} more requests`);
   }
   lines.push(...formatInterleaving(ordered.slice(0, maxRequests)));
+  const stale = staleReadPattern(trial);
+  if (stale) {
+    lines.push(
+      "    Pattern: check-then-act. Several requests read this before any of them wrote:",
+      `      ${oneLine(stale)}`,
+      "    Likely fixes: SELECT … FOR UPDATE on the row being checked, a conditional write that",
+      "                  re-checks in the same statement (+ affected-rows check), a constraint,",
+      "                  or SERIALIZABLE with retry.",
+    );
+  }
   return lines;
 }
 
@@ -74,8 +92,9 @@ function formatInterleaving(requests: readonly RequestTrace[]): string[] {
   if (!steps.length) return [];
   const lines = ["    SQL, in the order it ran:"];
   for (const { r, q } of steps) {
+    const held = q.heldMs ? `  (held ${q.heldMs}ms)` : "";
     lines.push(
-      `      #${String(r.index).padEnd(3)} ${oneLine(q.sql)}${paramList(q)} → ${queryOutcome(q)}`,
+      `      #${String(r.index).padEnd(3)} ${oneLine(q.sql)}${paramList(q)} → ${queryOutcome(q)}${held}`,
     );
   }
   return lines;

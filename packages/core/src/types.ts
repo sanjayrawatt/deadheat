@@ -49,12 +49,23 @@ export interface QueryRecord {
   durationMs: number;
   /** Transaction status after the query: idle, in transaction, failed. */
   txStatus: "I" | "T" | "E";
+  /** How long the proxy held this query's result back (race-window widening). */
+  heldMs?: number;
 }
 
 /** Where the runner gets each request's queries from (e.g. a running `deadheat proxy`). */
 export interface QueryLog {
   /** Returns, and forgets, the queries recorded for these request ids. */
   take(requestIds: readonly string[]): Promise<Record<string, QueryRecord[]>>;
+  /** Asks the proxy to hold the results of these reads (`null` clears all holds). */
+  setHolds?(holds: HoldRules | null): Promise<void>;
+}
+
+/** Reads whose results the proxy delays, to widen race windows. */
+export interface HoldRules {
+  holdMs: number;
+  /** Fingerprints (see `fingerprint()`) of the decision reads to hold. */
+  fingerprints: string[];
 }
 
 /** Header carrying the request id; the agent puts it into the app's SQL. */
@@ -96,6 +107,8 @@ export interface RunResult {
   violations: number;
   /** Set when the run stopped early, e.g. when setup leaves the invariant already broken. */
   aborted?: string;
+  /** Race-window widening that was active, if any (learned from the run's own trials). */
+  widen?: HoldRules;
 }
 
 /** How a trial's requests are released. `naive` now; `sync` in Week 3; proxy-driven ones later. */

@@ -7,6 +7,7 @@ import {
   startupParams,
   type Frame,
 } from "./protocol.js";
+import { fingerprint, type HoldRules } from "@deadheat/core";
 import { QueryTracker, type ProxyEvent } from "./tracker.js";
 
 export type {
@@ -25,8 +26,13 @@ export interface ProxyOptions {
   onEvent?: (event: ProxyEvent) => void;
 }
 
+export type { HoldRules };
+
 export interface RunningProxy {
   port: number;
+  /** Start holding (or, with `null`, stop holding) the results of matching reads. */
+  setHolds(rules: HoldRules | null): void;
+  readonly holds: HoldRules | null;
   close(): Promise<void>;
 }
 
@@ -38,6 +44,11 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
   const emit = options.onEvent ?? (() => {});
   const live = new Set<Socket>();
   let nextId = 1;
+  let holds: { rules: HoldRules; set: Set<string> } | null = null;
+
+  // Only queries tagged by the agent are held, so other traffic through the proxy isn't slowed.
+  const holdFor = (sql: string, requestId: string | undefined): number =>
+    holds && requestId && holds.set.has(fingerprint(sql)) ? holds.rules.holdMs : 0;
 
   const server = createServer((client) => {
     const connectionId = nextId++;
@@ -51,9 +62,33 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
     const tracker = new QueryTracker(connectionId, emit);
     let closed = false;
 
+    // Server→client frames go through this queue. A hold pauses it; frames that arrive in the
+    // meantime wait behind the held ones, so order is always kept.
+    const outbox: Buffer[] = [];
+    let pausedUntil = 0;
+    let timer: NodeJS.Timeout | undefined;
+    const flush = () => {
+      timer = undefined;
+      const wait = pausedUntil - performance.now();
+      if (wait > 0) {
+        timer = setTimeout(flush, wait);
+        return;
+      }
+      if (outbox.length && !closed) client.write(Buffer.concat(outbox.splice(0)));
+    };
+    const toClient = (raw: Buffer) => {
+      if (outbox.length || performance.now() < pausedUntil) {
+        outbox.push(raw);
+        timer ??= setTimeout(flush, Math.max(0, pausedUntil - performance.now()));
+      } else {
+        client.write(raw);
+      }
+    };
+
     const shutdown = () => {
       if (closed) return;
       closed = true;
+      clearTimeout(timer);
       client.destroy();
       upstream.destroy();
       live.delete(client);
@@ -101,8 +136,10 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
         return shutdown();
       }
       for (const frame of frames) {
+        const holdMs = tracker.responding()?.decide(holdFor) ?? 0;
+        if (holdMs > 0) pausedUntil = Math.max(pausedUntil, performance.now() + holdMs);
         tracker.backend(frame);
-        client.write(frame.raw);
+        toClient(frame.raw);
       }
     });
 
@@ -120,6 +157,12 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
 
   return {
     port: (server.address() as AddressInfo).port,
+    setHolds(rules) {
+      holds = rules ? { rules, set: new Set(rules.fingerprints) } : null;
+    },
+    get holds() {
+      return holds?.rules ?? null;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         for (const socket of live) socket.destroy();

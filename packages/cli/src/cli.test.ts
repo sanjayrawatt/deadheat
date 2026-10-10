@@ -53,6 +53,8 @@ describe("deadheat CLI arguments", () => {
     [["run", "x.ts", "--strategy", "naive", "--settle", "5"], /--settle only applies/],
     [["run", "x.ts", "--settle=-1"], /--settle must be/],
     [["run", "x.ts"], /no database/],
+    [["run", "x.ts", "--widen", "200"], /--widen needs --proxy/],
+    [["run", "x.ts", "--widen", "0", "--proxy", "http://x"], /--widen must be/],
     [
       [
         "run",
