@@ -51,6 +51,9 @@ export interface QueryRecord {
   txStatus: "I" | "T" | "E";
   /** How long the proxy held this query's result back (race-window widening). */
   heldMs?: number;
+  /** The proxy's id for the app's database connection. Replay keeps per-connection order. */
+  connectionId?: number;
+  protocol?: "simple" | "extended";
 }
 
 /** Where the runner gets each request's queries from (e.g. a running `deadheat proxy`). */
@@ -97,10 +100,25 @@ export interface TrialResult {
   requests: RequestTrace[];
 }
 
+/** Bumped whenever the saved run format changes incompatibly. */
+export const RUN_FORMAT_VERSION = 1;
+
+/** What a run was started with, so a saved run can be understood (and later replayed). */
+export interface RunConfig {
+  /** Scenario file, relative to where `deadheat run` was started. Set by the CLI. */
+  scenarioFile?: string;
+  baseUrl: string;
+  concurrency: number;
+  trials: number;
+  widenMs?: number;
+}
+
 export interface RunResult {
+  formatVersion: typeof RUN_FORMAT_VERSION;
   runId: string;
   scenario: string;
   strategy: string;
+  config: RunConfig;
   startedAt: string;
   durationMs: number;
   trials: TrialResult[];

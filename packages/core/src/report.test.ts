@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatRun, percentile, sendSpread } from "./report.js";
+import { formatRun, formatTrialDetail, percentile, sendSpread } from "./report.js";
 import type { RunResult, TrialResult } from "./types.js";
 
 function trial(n: number, passed: boolean): TrialResult {
@@ -17,9 +17,11 @@ function trial(n: number, passed: boolean): TrialResult {
 }
 
 const base: RunResult = {
+  formatVersion: 1,
   runId: "run-1",
   scenario: "slot is never oversold",
   strategy: "naive",
+  config: { baseUrl: "http://127.0.0.1:4100", concurrency: 3, trials: 2 },
   startedAt: "2026-10-04T00:00:00Z",
   durationMs: 1234,
   trials: [trial(1, true), trial(2, false)],
@@ -79,6 +81,15 @@ describe("formatRun", () => {
 
   it("truncates long request lists", () => {
     expect(formatRun(base, { maxRequests: 1 })).toContain("… 2 more requests");
+  });
+});
+
+describe("formatTrialDetail", () => {
+  it("lists every request of a trial, including a passing one", () => {
+    const text = formatTrialDetail(trial(1, true));
+    expect(text).toContain("Trial 1: passed");
+    expect(text.split("\n").filter((l) => l.includes("Request #"))).toHaveLength(3);
+    expect(text).not.toContain("more requests");
   });
 });
 

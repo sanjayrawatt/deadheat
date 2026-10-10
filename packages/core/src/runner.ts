@@ -3,6 +3,7 @@ import type { Sql } from "postgres";
 import { learnDecisionReads } from "./widen.js";
 import {
   REQUEST_ID_HEADER,
+  RUN_FORMAT_VERSION,
   type QueryLog,
   type RequestSpec,
   type RunResult,
@@ -51,10 +52,18 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     scenario.actions.request(i),
   );
 
+  const baseUrl = options.baseUrl ?? scenario.baseUrl;
   const result: RunResult = {
+    formatVersion: RUN_FORMAT_VERSION,
     runId: newRunId(),
     scenario: scenario.name,
     strategy: strategy.name,
+    config: {
+      baseUrl,
+      concurrency: scenario.actions.concurrency,
+      trials: total,
+      ...(options.widen ? { widenMs: options.widen.holdMs } : {}),
+    },
     startedAt: new Date().toISOString(),
     durationMs: 0,
     trials: [],
@@ -79,7 +88,6 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
         break;
       }
 
-      const baseUrl = options.baseUrl ?? scenario.baseUrl;
       const ids = specs.map((_, i) => `${result.runId}.${trial}.${i}`);
       const tagged = specs.map((spec, i) => ({
         ...spec,

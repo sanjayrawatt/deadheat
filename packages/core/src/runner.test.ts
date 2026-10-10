@@ -53,6 +53,8 @@ describe("runScenario", () => {
     expect(onTrial).toHaveBeenCalledTimes(5);
     expect(run.strategy).toBe("fake");
     expect(run.runId).toMatch(/^run-\d{8}T\d{6}-[0-9a-f]{4}$/);
+    expect(run.formatVersion).toBe(1);
+    expect(run.config).toEqual({ baseUrl: "http://127.0.0.1:1", concurrency: 3, trials: 5 });
   });
 
   it("lets options.trials override scenario.trials", async () => {

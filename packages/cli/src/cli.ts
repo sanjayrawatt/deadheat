@@ -1,16 +1,19 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   createSync,
   DEFAULT_SETTLE_MS,
   formatRun,
+  formatTrialDetail,
   loadScenario,
   runScenario,
+  RUN_FORMAT_VERSION,
   strategies,
   VERSION,
   type QueryLog,
   type QueryRecord,
+  type RunResult,
   type Strategy,
 } from "@deadheat/core";
 import {
@@ -50,6 +53,7 @@ const HELP = `deadheat ${VERSION}: find the race conditions in your API before y
 Usage:
   deadheat run <scenario.ts> [options]     attack an API and check the invariant
   deadheat proxy [options]                 sit between an app and Postgres, print every query
+  deadheat show [run-id | file.json]       print a saved run again (default: the latest)
 
 Run options:
   --strategy <name>      ${Object.keys(strategies).join(" | ")} (default: sync)
@@ -64,6 +68,10 @@ Run options:
                          acts on (decision reads) for <ms>, so concurrent requests all read
                          before any writes. Makes rare races show up on almost every trial
   --no-save              don't write the run to .deadheat/runs/<run-id>.json
+  --verbose              list every violating trial in full
+
+Show options:
+  --trial <n>            print trial <n> in full: every request and all of its SQL, in order
   --verbose              list every violating trial in full
 
 Proxy options:
@@ -81,6 +89,7 @@ Exit codes: 0 no violation, 1 invariant violated, 2 error or aborted run.
 /** The whole CLI as a function, so tests can run it without spawning a process. */
 export async function main(argv: string[], io: Io = defaultIo): Promise<number> {
   if (argv[0] === "proxy") return proxyCommand(argv.slice(1), io);
+  if (argv[0] === "show") return showCommand(argv.slice(1), io);
   let parsed;
   try {
     parsed = parseArgs({
@@ -176,6 +185,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       ...(widenMs ? { widen: { holdMs: widenMs } } : {}),
       onTrial: (t) => io.err(t.passed ? "." : "x"),
     });
+    run.config.scenarioFile = relative(io.cwd, resolve(io.cwd, scenarioPath));
     io.err("\n");
     io.out(`${formatRun(run, values.verbose ? { maxViolations: Infinity } : {})}\n`);
 
@@ -194,6 +204,74 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
   } finally {
     await sql.end();
   }
+}
+
+async function showCommand(argv: string[], io: Io): Promise<number> {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        trial: { type: "string" },
+        verbose: { type: "boolean", default: false },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    });
+  } catch (err) {
+    io.err(`${(err as Error).message}\n\n${HELP}`);
+    return EXIT_ERROR;
+  }
+  const { values, positionals } = parsed;
+  if (values.help) {
+    io.out(HELP);
+    return EXIT_OK;
+  }
+  const fail = (message: string) => {
+    io.err(`error: ${message}\n`);
+    return EXIT_ERROR;
+  };
+  if (positionals.length > 1) return fail("Expected: deadheat show [run-id | file.json]");
+
+  let trialNo: number | undefined;
+  if (values.trial !== undefined) {
+    trialNo = Number(values.trial);
+    if (!Number.isInteger(trialNo) || trialNo < 1) return fail("--trial must be an integer >= 1");
+  }
+
+  const dir = join(io.cwd, ".deadheat", "runs");
+  const [target] = positionals;
+  let file: string;
+  if (!target) {
+    const names = (await readdir(dir).catch(() => [] as string[]))
+      .filter((n) => n.endsWith(".json"))
+      .sort();
+    if (!names.length) return fail(`no saved runs in ${dir}`);
+    file = join(dir, names.at(-1)!);
+  } else {
+    file = target.endsWith(".json") ? resolve(io.cwd, target) : join(dir, `${target}.json`);
+  }
+
+  let run: RunResult;
+  try {
+    run = JSON.parse(await readFile(file, "utf8")) as RunResult;
+  } catch (err) {
+    return fail(`cannot read ${file}: ${(err as Error).message}`);
+  }
+  if ((run.formatVersion ?? 0) > RUN_FORMAT_VERSION) {
+    return fail(
+      `${file} uses run format ${run.formatVersion}, newer than this deadheat (${RUN_FORMAT_VERSION}). Upgrade deadheat.`,
+    );
+  }
+
+  if (trialNo === undefined) {
+    io.out(`${formatRun(run, values.verbose ? { maxViolations: Infinity } : {})}\n`);
+    return EXIT_OK;
+  }
+  const trial = run.trials.find((t) => t.trial === trialNo);
+  if (!trial) return fail(`${run.runId} has no trial ${trialNo} (it has ${run.trials.length})`);
+  io.out(`${run.scenario}, ${run.runId}, strategy=${run.strategy}\n${formatTrialDetail(trial)}\n`);
+  return EXIT_OK;
 }
 
 function pickStrategy(name: string, settle: string | undefined): Strategy | string {
@@ -324,6 +402,8 @@ function toRecord(e: QueryEvent): QueryRecord {
     durationMs: e.durationMs,
     txStatus: e.txStatus,
     ...(e.heldMs ? { heldMs: e.heldMs } : {}),
+    connectionId: e.connectionId,
+    protocol: e.protocol,
   };
 }
 

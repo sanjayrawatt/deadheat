@@ -133,7 +133,14 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
 - **Report:** a `Widened:` line lists the held reads, each held query shows `(held Nms)`, and a **`Pattern: check-then-act`** hint appears when ≥2 successful requests ran the same decision read and all those reads started before the first of their writes.
 - **Boundary:** a single-statement race (`INSERT … SELECT … WHERE count < capacity`) has no separate read, so nothing is learned and nothing is held. Read-hold widening can't help there. v2's scheduler targets it differently: it can hold each request's statement at the proxy and release them together (a barrier at the database), so their snapshots overlap no matter how the HTTP requests arrived.
 
-**Next (Week 7):** record the full trace of every run (all queries, with timings and hold info) under `.deadheat/runs/`, ready for the scheduler and replay in Weeks 8–9.
+**Built in Week 7** (trace recording, `deadheat show`):
+
+- **A saved run is the trace.** `.deadheat/runs/<run-id>.json` holds every trial, every request, and each request's queries: SQL, parameters, first row, timings, transaction status, `heldMs`, plus the proxy's `connectionId` and `protocol`. Per-connection query order is what replay will enforce.
+- **Self-describing.** `formatVersion` (now 1) lets later versions refuse or migrate old files. `config` records what the run was started with: `scenarioFile` (relative to where `deadheat run` ran), `baseUrl`, `concurrency`, `trials`, `widenMs`. The strategy name already carries the settle.
+- **`deadheat show [run-id | file.json]`** prints a saved run again (default: the latest). `--trial <n>` prints one trial in full, passing or not: every request and its whole SQL interleaving.
+- No seeds yet: nothing random is chosen until the scheduler exists.
+
+**Next (Weeks 8–9):** the scheduler. The proxy holds and releases queries itself, explores interleavings with a seed, and `deadheat replay <run-id> --trial <n>` forces a saved trial's query order.
 
 ## 6. Report format
 
@@ -150,7 +157,7 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
   Replay: available from v1 (needs query-level trace)
 ```
 
-Exit code 1 on any violation, so it works in CI. A JSON copy of every run goes to `.deadheat/runs/<run-id>.json`.
+Exit code 1 on any violation, so it works in CI. A JSON copy of every run goes to `.deadheat/runs/<run-id>.json`, and `deadheat show` prints it again.
 
 ## 7. Open questions and risks
 

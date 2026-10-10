@@ -86,3 +86,13 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - The full widening benchmark aborted at N=20: a `sync` trial got no response from any of its 20 requests for 30s. Isolated step by step: it happened only through Toxiproxy in Docker, with or without `deadheat proxy`. During the hang the client held 20 established connections, the app had none, and Toxiproxy never logged accepting them. Docker Desktop's port forwarder swallowed the burst. Pacing trials didn't help.
 - Replaced Toxiproxy in the widen benchmark with a ~50-line host-side jitter proxy. 900 N=20 trials, no hang.
 - Results ([BENCHMARKS.md §6](docs/BENCHMARKS.md)): naive variant at 10ms jitter goes from 33–36% (N=2) to **100%** with widening. The single-statement variant stays where sync is, as expected.
+
+## Week 7 (Nov 9 – Nov 15, 2026)
+
+### 2026-10-10: trace recording
+
+- Most of the trace was already in the saved run: every request's queries with timings and `heldMs`. What was missing was dropped on the way: the proxy sent `connectionId` and `protocol`, and the CLI threw them away. Per-connection order is exactly what replay needs, so they're kept now.
+- Saved runs carry `formatVersion: 1` and a `config` block (scenario file, base URL, concurrency, trials, widen), so a run file explains itself and a later replay knows what to start.
+- `deadheat show` re-prints a saved run (latest by default), and `--trial <n>` prints one trial in full, passing or not.
+- Replay itself waits for the Week 8 scheduler: forcing a query order needs the proxy to hold and release queries.
+- 108 tests.

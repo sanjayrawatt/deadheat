@@ -51,12 +51,17 @@ export function formatRun(run: RunResult, options: ReportOptions = {}): string {
   return lines.join("\n");
 }
 
+/** One trial in full: every request and the whole SQL interleaving, passed or not. */
+export function formatTrialDetail(trial: TrialResult): string {
+  return formatTrial(trial, Infinity).join("\n");
+}
+
 function formatTrial(trial: TrialResult, maxRequests: number): string[] {
   // Successful requests first: they're the ones that slipped past the check.
   const ordered = [...trial.requests].sort(
     (a, b) => rank(a) - rank(b) || (a.headersAtMs ?? Infinity) - (b.headersAtMs ?? Infinity),
   );
-  const lines = [`  Trial ${trial.trial}: ${trial.violation}`];
+  const lines = [`  Trial ${trial.trial}: ${trial.violation ?? "passed"}`];
   for (const r of ordered.slice(0, maxRequests)) {
     const outcome = r.error ? `ERR ${r.error}` : String(r.status);
     const headers = r.headersAtMs === undefined ? "" : `  response +${ms(r.headersAtMs)}`;

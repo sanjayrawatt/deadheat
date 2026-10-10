@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
@@ -76,6 +76,101 @@ describe("deadheat CLI arguments", () => {
     const t = io({ DEADHEAT_DATABASE_URL: "postgres://nobody@127.0.0.1:1/none" });
     expect(await main(["run", "bad.ts"], t.io)).toBe(EXIT_ERROR);
     expect(t.err()).toMatch(/invalid scenario/);
+  });
+});
+
+describe("deadheat show", () => {
+  const run = (id: string, extra: object = {}) => ({
+    formatVersion: 1,
+    runId: id,
+    scenario: "slot is never oversold",
+    strategy: "sync",
+    config: { baseUrl: "http://127.0.0.1:4100", concurrency: 2, trials: 2 },
+    startedAt: "2026-10-10T00:00:00Z",
+    durationMs: 100,
+    violations: 1,
+    trials: [
+      { trial: 1, passed: true, durationMs: 5, requests: [] },
+      {
+        trial: 2,
+        passed: false,
+        violation: "bookings = 2, capacity = 1",
+        durationMs: 5,
+        requests: [0, 1].map((index) => ({
+          index,
+          method: "POST",
+          url: "/bookings",
+          sentAtMs: index,
+          status: 201,
+          queries: [
+            {
+              sql: "SELECT COUNT(*) FROM bookings WHERE slot_id = $1",
+              params: ["1"],
+              rows: 1,
+              firstRow: ["0"],
+              commandTags: ["SELECT 1"],
+              startedAt: index,
+              durationMs: 1,
+              txStatus: "I",
+              connectionId: index + 1,
+              protocol: "extended",
+            },
+          ],
+        })),
+      },
+    ],
+    ...extra,
+  });
+  let showDir: string;
+
+  beforeAll(async () => {
+    showDir = await mkdtemp(join(tmpdir(), "deadheat-show-"));
+    await mkdir(join(showDir, ".deadheat", "runs"), { recursive: true });
+    for (const r of [run("run-20261010T100000-aaaa"), run("run-20261010T110000-bbbb")]) {
+      await writeFile(join(showDir, ".deadheat", "runs", `${r.runId}.json`), JSON.stringify(r));
+    }
+    await writeFile(
+      join(showDir, "future.json"),
+      JSON.stringify(run("run-x", { formatVersion: 99 })),
+    );
+  });
+  afterAll(() => rm(showDir, { recursive: true, force: true }));
+
+  const showIo = () => {
+    const t = io();
+    t.io.cwd = showDir;
+    return t;
+  };
+
+  it("prints the latest saved run by default", async () => {
+    const t = showIo();
+    expect(await main(["show"], t.io)).toBe(EXIT_OK);
+    expect(t.out()).toContain("1/2 trials violated");
+    expect(t.out()).toContain("run-20261010T110000-bbbb");
+  });
+
+  it("prints one trial in full by run id", async () => {
+    const t = showIo();
+    expect(await main(["show", "run-20261010T100000-aaaa", "--trial", "2"], t.io)).toBe(EXIT_OK);
+    expect(t.out()).toContain("Trial 2: bookings = 2, capacity = 1");
+    expect(t.out()).toContain("SQL, in the order it ran:");
+  });
+
+  it.each([
+    [["show", "run-nope"], /cannot read .*run-nope\.json/],
+    [["show", "--trial", "7"], /has no trial 7 \(it has 2\)/],
+    [["show", "--trial", "0"], /--trial must be/],
+    [["show", "future.json"], /run format 99, newer than this deadheat/],
+  ])("%j fails with a clear message", async (argv, message) => {
+    const t = showIo();
+    expect(await main(argv, t.io)).toBe(EXIT_ERROR);
+    expect(t.err()).toMatch(message);
+  });
+
+  it("says so when there are no saved runs", async () => {
+    const t = io();
+    expect(await main(["show"], t.io)).toBe(EXIT_ERROR);
+    expect(t.err()).toMatch(/no saved runs in/);
   });
 });
 

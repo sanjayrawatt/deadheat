@@ -99,6 +99,10 @@ describe("booking-api through the proxy", () => {
           r.status === 201 ? ["SELECT", "SELECT", "INSERT"] : ["SELECT", "SELECT"],
         );
         expect(r.queries![0]!.params).toEqual(["1"]);
+        for (const q of r.queries!) {
+          expect(q.connectionId).toEqual(expect.any(Number));
+          expect(q.protocol).toBe("extended");
+        }
       }
     }
 
