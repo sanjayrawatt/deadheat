@@ -6,6 +6,7 @@ import {
   RUN_FORMAT_VERSION,
   type QueryLog,
   type RequestSpec,
+  type ScheduleStep,
   type RunResult,
   type Scenario,
   type Strategy,
@@ -27,6 +28,11 @@ export interface RunOptions {
    * the proxy holds those reads' results for `holdMs`.
    */
   widen?: { holdMs: number };
+  /**
+   * Controlled interleaving (needs `deadheat proxy`): the proxy holds each request's queries
+   * and releases one step at a time, choosing with a PRNG seeded from `seed` and the trial.
+   */
+  schedule?: { seed: number; quietMs?: number; stepTimeoutMs?: number };
   /** Called after every trial, e.g. to print progress. */
   onTrial?: (result: TrialResult) => void;
 }
@@ -63,18 +69,25 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       concurrency: scenario.actions.concurrency,
       trials: total,
       ...(options.widen ? { widenMs: options.widen.holdMs } : {}),
+      ...(options.schedule ? { schedule: "random" as const } : {}),
     },
     startedAt: new Date().toISOString(),
     durationMs: 0,
     trials: [],
     violations: 0,
+    ...(options.schedule ? { seed: options.schedule.seed } : {}),
   };
   const runStart = performance.now();
 
-  const { queryLog, widen } = options;
+  const { queryLog, widen, schedule } = options;
   if (widen && !queryLog?.setHolds) {
     throw new Error("widening needs a query log that can hold reads (deadheat proxy)");
   }
+  if (schedule && (!queryLog?.startSchedule || !queryLog.stopSchedule)) {
+    throw new Error("scheduling needs a query log that can schedule queries (deadheat proxy)");
+  }
+  if (schedule && widen) throw new Error("use either widening or scheduling, not both");
+  let scheduling = false;
   const learned = new Set<string>();
 
   try {
@@ -93,8 +106,27 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
         ...spec,
         headers: { ...spec.headers, [REQUEST_ID_HEADER]: ids[i]! },
       }));
+      let trialSeed: number | undefined;
+      if (schedule) {
+        trialSeed = deriveSeed(schedule.seed, trial);
+        await queryLog!.startSchedule!({
+          prefix: `${result.runId}.${trial}.`,
+          requests: specs.length,
+          seed: trialSeed,
+          ...(schedule.quietMs !== undefined ? { quietMs: schedule.quietMs } : {}),
+          ...(schedule.stepTimeoutMs !== undefined
+            ? { stepTimeoutMs: schedule.stepTimeoutMs }
+            : {}),
+        });
+        scheduling = true;
+      }
       const requests = await strategy.fire(baseUrl, tagged);
       requests.forEach((r) => (r.requestId = ids[r.index]!));
+      let order: ScheduleStep[] | undefined;
+      if (schedule) {
+        order = await queryLog!.stopSchedule!();
+        scheduling = false;
+      }
 
       // If nothing reached the app, the invariant trivially holds, and a green result would
       // be a lie (e.g. a wrong port in CI). Stop instead.
@@ -114,6 +146,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
         ...(verdict === true ? {} : { violation: verdict }),
         durationMs: performance.now() - trialStart,
         requests,
+        ...(order ? { schedule: order, seed: trialSeed! } : {}),
       };
       if (!trialResult.passed) result.violations++;
       result.trials.push(trialResult);
@@ -130,8 +163,16 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     }
   } finally {
     if (widen) await queryLog!.setHolds!(null);
+    if (scheduling) await queryLog!.stopSchedule!();
   }
 
   result.durationMs = performance.now() - runStart;
   return result;
+}
+
+/** A per-trial seed: the same run seed and trial always give the same value. */
+export function deriveSeed(seed: number, trial: number): number {
+  let h = Math.imul((seed ^ 0x9e3779b9) >>> 0, 0x85ebca6b) ^ Math.imul(trial, 0xc2b2ae35);
+  h = Math.imul(h ^ (h >>> 16), 0x7feb352d);
+  return (h ^ (h >>> 15)) >>> 0;
 }

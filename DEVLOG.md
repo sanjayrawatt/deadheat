@@ -96,3 +96,16 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - `deadheat show` re-prints a saved run (latest by default), and `--trial <n>` prints one trial in full, passing or not.
 - Replay itself waits for the Week 8 scheduler: forcing a query order needs the proxy to hold and release queries.
 - 108 tests.
+
+## Week 8 (Nov 16 – Nov 22, 2026)
+
+### 2026-10-10: the scheduler
+
+- The proxy can now hold a trial's queries and release them one batch at a time (`--schedule random --seed n`). A batch is a `Q`, or `Parse` … `Sync`, and a step ends at its `ReadyForQuery`. A per-connection inbox keeps order: anything behind a held batch waits too.
+- **When to decide** was the real design question. The proxy can't know whether a request will send another query. So it decides when every request has a batch waiting, or after 15ms of quiet. The quiet path matters more than expected: booking-api's pool has 10 connections, so with 20 requests half of them aren't even able to send a query.
+- **Deadlock guard from day one:** a released step that hasn't finished after 100ms counts as blocked (probably on a row lock held by a request we're holding), and others go on. The playbook warned about this; it's a timeout for now, with real lock detection in Weeks 10–11.
+- Same seed, same order: the e2e test runs seed 2026 twice and gets identical release orders and violation counts, 8 out of 8 reruns. The choice uses a seeded PRNG over the waiting set sorted by request index, so arrival jitter inside that set doesn't matter.
+- N=20 booking, 10 trials: 10/10 violated, ~0.9s per trial (each step can cost up to the 15ms quiet window).
+- The bug from a test, not the code: my first determinism test spun a synchronous loop waiting for a timer that could never fire, which hung vitest with no timeout. Now it awaits.
+- CI actions bumped to their Node 24 majors (checkout v7, setup-node v7, pnpm/action-setup v6), after GitHub's Node 20 deprecation warning.
+- 130 tests.

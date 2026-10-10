@@ -140,7 +140,16 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
 - **`deadheat show [run-id | file.json]`** prints a saved run again (default: the latest). `--trial <n>` prints one trial in full, passing or not: every request and its whole SQL interleaving.
 - No seeds yet: nothing random is chosen until the scheduler exists.
 
-**Next (Weeks 8–9):** the scheduler. The proxy holds and releases queries itself, explores interleavings with a seed, and `deadheat replay <run-id> --trial <n>` forces a saved trial's query order.
+**Built in Week 8** (scheduler, `deadheat run --schedule random [--seed n]`):
+
+- **Unit of scheduling:** one client batch, i.e. a simple `Q`, or extended-protocol frames from `Parse` up to `Sync`. The request id comes from the agent's tag in the batch's SQL. Untagged batches, and batches from other trials, pass straight through.
+- **Per trial:** the runner sends `PUT /schedule { prefix: "<runId>.<trial>.", requests, seed }` before firing and `DELETE /schedule` after, which returns the release order. Each connection gets an inbox: a held batch waits there, and anything after it on that connection queues behind it, so per-connection order is kept.
+- **Step loop:** one batch in flight at a time. The next one is chosen when every request of the trial has a batch waiting, or when nothing new has arrived for `quietMs` (15ms), because some requests are done or wait for a pool connection. The choice is a seeded PRNG (mulberry32) over the waiting request ids sorted by index, so the same seed and the same waiting set give the same choice. A step is done at its `ReadyForQuery`.
+- **Lock waits:** a released batch that hasn't finished after `stepTimeoutMs` (100ms) is treated as blocked, e.g. on a row lock held by a request we are holding back, and the scheduler goes on releasing others. Without this, A (holding a lock, held by us) and B (waiting on that lock) would hang. Proper lock-wait detection is Weeks 10–11.
+- **Seeds:** the run seed (`--seed`, else random and printed) derives a seed per trial. Saved runs carry `seed`, and every trial its `seed` and `schedule` (release order, with stalled steps marked). The e2e test runs the same seed twice and gets the same orders and the same violations.
+- **Limit:** releasing one statement at a time serialises them, so the single-statement race can't happen under this policy. That needs a barrier policy, which releases a set together.
+
+**Next (Week 9):** PCT (priority-based scheduling with bounded depth, from the PCT paper) next to random, a barrier policy for single-statement races, `deadheat replay <run-id> --trial <n>` forcing a saved release order, and a hit-rate benchmark.
 
 ## 6. Report format
 

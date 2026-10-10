@@ -1,7 +1,7 @@
 import type { Sql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
-import { runScenario } from "./runner.js";
-import type { RequestTrace, Scenario, Strategy } from "./types.js";
+import { deriveSeed, runScenario } from "./runner.js";
+import type { RequestTrace, Scenario, ScheduleStep, Strategy, TrialSchedule } from "./types.js";
 
 // The fake scenarios below never touch the DB, so an empty object stands in for the client.
 const sql = {} as Sql;
@@ -156,5 +156,67 @@ describe("runScenario", () => {
     expect(first?.requestId).toBe(id(1, 0));
     expect(first?.queries?.map((q) => q.sql)).toEqual(["SELECT 1"]);
     expect(second?.queries).toEqual([]);
+  });
+
+  it("schedules each trial with a derived seed and records the release order", async () => {
+    const state = { trial: 0 };
+    const calls: string[] = [];
+    const started: TrialSchedule[] = [];
+    const queryLog = {
+      take: async () => ({}),
+      startSchedule: async (c: TrialSchedule) => {
+        calls.push("start");
+        started.push(c);
+      },
+      stopSchedule: async (): Promise<ScheduleStep[]> => {
+        calls.push("stop");
+        return [{ requestId: `${started.at(-1)!.prefix}1` }];
+      },
+    };
+    const strategy = fakeStrategy(state);
+    const fire = strategy.fire;
+    strategy.fire = async (b, specs) => {
+      calls.push("fire");
+      return fire(b, specs);
+    };
+    const run = await runScenario(makeScenario([], state, { trials: 2 }), {
+      strategy,
+      sql,
+      queryLog,
+      schedule: { seed: 42, quietMs: 5 },
+    });
+
+    expect(calls).toEqual(["start", "fire", "stop", "start", "fire", "stop"]);
+    expect(started.map((c) => c.prefix)).toEqual([`${run.runId}.1.`, `${run.runId}.2.`]);
+    expect(started.map((c) => c.seed)).toEqual([deriveSeed(42, 1), deriveSeed(42, 2)]);
+    expect(started[0]).toMatchObject({ requests: 3, quietMs: 5 });
+    expect(run.seed).toBe(42);
+    expect(run.config.schedule).toBe("random");
+    expect(run.trials[1]).toMatchObject({
+      seed: deriveSeed(42, 2),
+      schedule: [{ requestId: `${run.runId}.2.1` }],
+    });
+  });
+
+  it("refuses to schedule without a capable query log, or together with widening", async () => {
+    const state = { trial: 0 };
+    const options = { strategy: fakeStrategy(state), sql, schedule: { seed: 1 } };
+    await expect(runScenario(makeScenario([], state), options)).rejects.toThrow(/deadheat proxy/);
+    const queryLog = {
+      take: async () => ({}),
+      setHolds: async () => {},
+      startSchedule: async () => {},
+      stopSchedule: async () => [],
+    };
+    await expect(
+      runScenario(makeScenario([], state), { ...options, queryLog, widen: { holdMs: 10 } }),
+    ).rejects.toThrow(/not both/);
+  });
+
+  it("derives different, stable per-trial seeds", () => {
+    expect(deriveSeed(7, 1)).toBe(deriveSeed(7, 1));
+    expect(new Set([1, 2, 3, 4].map((t) => deriveSeed(7, t))).size).toBe(4);
+    expect(deriveSeed(7, 1)).not.toBe(deriveSeed(8, 1));
+    expect(Number.isInteger(deriveSeed(-5, 3)) && deriveSeed(-5, 3) >= 0).toBe(true);
   });
 });

@@ -39,7 +39,7 @@ beforeAll(async () => {
       if (e.type === "query") store.add(e);
     },
   });
-  control = await startControl({ store, holds: proxy });
+  control = await startControl({ store, holds: proxy, schedule: proxy });
   const viaProxy = new URL(DIRECT);
   viaProxy.hostname = "127.0.0.1";
   viaProxy.port = String(proxy.port);
@@ -169,5 +169,42 @@ describe("booking-api through the proxy", () => {
     } finally {
       await single.close();
     }
+  });
+
+  it("schedules: releases queries one at a time, finds the oversell, and repeats by seed", async () => {
+    const base = await loadScenario(scenarioPath);
+    const scenario = { ...base, actions: { ...base.actions, concurrency: 3 } };
+    const queryLog = await httpQueryLog(`http://127.0.0.1:${control.port}`);
+    const run = (seed: number) =>
+      runScenario(scenario, {
+        strategy: naive,
+        sql,
+        baseUrl,
+        trials: 12,
+        queryLog,
+        schedule: { seed, quietMs: 20 },
+      });
+    const first = await run(2026);
+
+    expect(first.seed).toBe(2026);
+    expect(first.violations).toBeGreaterThan(0);
+    for (const t of first.trials) {
+      const ran = t.requests
+        .flatMap((r) => r.queries!.map((q) => ({ id: r.requestId, q })))
+        .sort((a, b) => a.q.startedAt - b.q.startedAt);
+      expect(ran.map((x) => x.id)).toEqual(t.schedule!.map((s) => s.requestId));
+      for (let i = 1; i < ran.length; i++) {
+        const prev = ran[i - 1]!.q;
+        expect(ran[i]!.q.startedAt).toBeGreaterThanOrEqual(prev.startedAt + prev.durationMs);
+      }
+    }
+    expect(proxy.schedule).toBeNull();
+
+    const again = await run(2026);
+    const shape = (r: typeof first) =>
+      r.trials.map((t) => t.schedule!.map((s) => s.requestId.split(".").at(-1)).join(""));
+    expect(shape(again)).toEqual(shape(first));
+    expect(again.violations).toBe(first.violations);
+    expect(formatRun(first)).toContain("seed 2026");
   });
 });

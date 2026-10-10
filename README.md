@@ -4,7 +4,7 @@
 
 Double bookings, double spends, a coupon redeemed twice, stock going negative. These bugs only show up when two requests arrive at the same moment, so a normal test suite, which sends one request at a time, never catches them. With Deadheat, you describe a rule that must always hold (for example, "bookings for a slot never exceed its capacity") and it hits your API with precisely synchronized concurrent requests to break that rule. Later versions add a proxy in front of Postgres that pauses and reorders queries to force the dangerous timing. When the rule breaks, Deadheat shows the exact sequence of requests and queries that caused it, so you can replay it.
 
-**Status:** v0 done (burst mode, `deadheat run`). v1 in progress: `deadheat proxy` sits between the app and Postgres, and with the agent in the app, every report shows each request's SQL in the order it ran. `--widen` makes rare races show up on almost every trial, and every run is saved as a full trace. Not on npm yet.
+**Status:** v0 done (burst mode, `deadheat run`). v1 in progress: `deadheat proxy` sits between the app and Postgres, and with the agent in the app, every report shows each request's SQL in the order it ran. `--widen` makes rare races show up on almost every trial, `--schedule random` controls the query order with a seed, and every run is saved as a full trace. Not on npm yet.
 
 ## Local development
 
@@ -81,6 +81,8 @@ node packages/cli/dist/bin.js run scenarios/booking-oversell.ts --proxy http://1
 Both requests counted 0 bookings before either inserted: check-then-act on a stale read. (Trimmed from a real run of 5 shown requests.) Without `--proxy`, `deadheat proxy` on its own prints a live log of every query.
 
 **Make rare races common:** add `--widen 200`. Trial 1 learns which reads each request acts on, and from then on the proxy holds those reads' results for 200ms. Every concurrent request then reads before any of them writes, even when network jitter spreads their arrival out (numbers in [BENCHMARKS.md §6](docs/BENCHMARKS.md)).
+
+**Force the interleaving:** add `--schedule random`. The proxy holds every request's queries and releases them one at a time in a random order chosen by a seed, so the dangerous order isn't left to luck. The report prints the seed and each violating trial's release order, and `--seed <n>` gives the same orders again.
 
 **Look again later:** every run is saved to `.deadheat/runs/<run-id>.json`. `deadheat show` prints the latest one again, and `deadheat show <run-id> --trial 3` prints trial 3 in full, with every request and all of its SQL in order.
 

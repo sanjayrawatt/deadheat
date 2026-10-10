@@ -62,6 +62,7 @@ describe("control server", () => {
       ok: true,
       queries: 1,
       holds: null,
+      schedule: null,
     });
     const res = await fetch(`${base}/take`, {
       method: "POST",
@@ -102,6 +103,38 @@ describe("control server holds", () => {
     const bad = await fetch(`${base}/holds`, { method: "PUT", body: '{"holdMs": -1}' });
     expect(bad.status).toBe(400);
     await fetch(`${base}/holds`, { method: "DELETE" });
+    expect(current).toBeNull();
+  });
+
+  it("starts a schedule, rejects bad ones, and returns the release order on stop", async () => {
+    type Config = { prefix: string; requests: number; seed: number };
+    let current: Config | null = null;
+    const schedule = {
+      setSchedule: (c: Config | null) => {
+        current = c;
+        return c ? [] : [{ requestId: "r.1.0" }];
+      },
+      get schedule() {
+        return current;
+      },
+    };
+    control = await startControl({ store: new QueryStore(), schedule });
+    const base = `http://127.0.0.1:${control.port}`;
+
+    const config = { prefix: "r.1.", requests: 2, seed: 5 };
+    const put = await fetch(`${base}/schedule`, { method: "PUT", body: JSON.stringify(config) });
+    expect(put.status).toBe(200);
+    expect(current).toEqual(config);
+    for (const body of [
+      { ...config, prefix: "" },
+      { ...config, requests: 0 },
+      { ...config, seed: 1.5 },
+    ]) {
+      const bad = await fetch(`${base}/schedule`, { method: "PUT", body: JSON.stringify(body) });
+      expect(bad.status).toBe(400);
+    }
+    const del = await fetch(`${base}/schedule`, { method: "DELETE" });
+    expect(await del.json()).toEqual({ order: [{ requestId: "r.1.0" }] });
     expect(current).toBeNull();
   });
 });

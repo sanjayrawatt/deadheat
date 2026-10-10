@@ -84,6 +84,32 @@ describe("formatRun", () => {
   });
 });
 
+describe("scheduled runs", () => {
+  it("prints the run seed and each violating trial's release order", () => {
+    const t = trial(2, false);
+    t.seed = 123;
+    t.schedule = [
+      { requestId: "run-1.2.1" },
+      { requestId: "run-1.2.0", stalled: true },
+      { requestId: "run-1.2.1" },
+    ];
+    const text = formatRun({ ...base, seed: 42, trials: [trial(1, true), t] });
+    expect(text).toContain("Scheduled: queries released one at a time in a random order, seed 42");
+    expect(text).toContain(
+      "Release order (trial seed 123): #1 #0* #1 (* = blocked, others went on)",
+    );
+  });
+});
+
+describe("long release orders", () => {
+  it("shows the first 30 steps and counts the rest", () => {
+    const t = trial(2, false);
+    t.seed = 1;
+    t.schedule = Array.from({ length: 35 }, (_, i) => ({ requestId: `run-1.2.${i % 3}` }));
+    expect(formatRun({ ...base, seed: 9, trials: [t] })).toMatch(/#2 … \+5 more$/m);
+  });
+});
+
 describe("formatTrialDetail", () => {
   it("lists every request of a trial, including a passing one", () => {
     const text = formatTrialDetail(trial(1, true));

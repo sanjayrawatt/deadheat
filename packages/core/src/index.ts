@@ -1,7 +1,7 @@
 export const VERSION = "0.0.0";
 
 export * from "./types.js";
-export { runScenario, DEFAULT_TRIALS, type RunOptions } from "./runner.js";
+export { runScenario, deriveSeed, DEFAULT_TRIALS, type RunOptions } from "./runner.js";
 export { loadScenario, validateScenario } from "./loader.js";
 export {
   formatRun,

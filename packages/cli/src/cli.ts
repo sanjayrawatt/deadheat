@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -14,6 +15,7 @@ import {
   type QueryLog,
   type QueryRecord,
   type RunResult,
+  type ScheduleStep,
   type Strategy,
 } from "@deadheat/core";
 import {
@@ -67,6 +69,10 @@ Run options:
   --widen <ms>           with --proxy: after trial 1, hold the results of the reads each request
                          acts on (decision reads) for <ms>, so concurrent requests all read
                          before any writes. Makes rare races show up on almost every trial
+  --schedule random      with --proxy: hold every request's queries and release them one at a
+                         time in a seeded random order (controlled interleaving)
+  --seed <n>             seed for --schedule (default: random, printed in the report). The same
+                         seed gives the same release order
   --no-save              don't write the run to .deadheat/runs/<run-id>.json
   --verbose              list every violating trial in full
 
@@ -104,6 +110,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         "database-url": { type: "string" },
         proxy: { type: "string" },
         widen: { type: "string" },
+        schedule: { type: "string" },
+        seed: { type: "string" },
         save: { type: "boolean", default: true },
         verbose: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -153,6 +161,20 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     }
   }
 
+  let seed: number | undefined;
+  if (values.schedule !== undefined) {
+    if (values.schedule !== "random") return fail('--schedule must be "random"');
+    if (!values.proxy)
+      return fail("--schedule needs --proxy (the proxy is what holds the queries)");
+    if (widenMs) return fail("use either --widen or --schedule, not both");
+    seed = values.seed === undefined ? randomInt(2 ** 31) : Number(values.seed);
+    if (!Number.isInteger(seed) || seed < 0 || seed >= 2 ** 32) {
+      return fail("--seed must be an integer between 0 and 4294967295");
+    }
+  } else if (values.seed !== undefined) {
+    return fail("--seed only applies to --schedule");
+  }
+
   const databaseUrl = values["database-url"] ?? io.env.DEADHEAT_DATABASE_URL;
   if (!databaseUrl) {
     return fail("no database: pass --database-url or set DEADHEAT_DATABASE_URL");
@@ -183,6 +205,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       ...(values["base-url"] ? { baseUrl: values["base-url"] } : {}),
       ...(queryLog ? { queryLog } : {}),
       ...(widenMs ? { widen: { holdMs: widenMs } } : {}),
+      ...(seed !== undefined ? { schedule: { seed } } : {}),
       onTrial: (t) => io.err(t.passed ? "." : "x"),
     });
     run.config.scenarioFile = relative(io.cwd, resolve(io.cwd, scenarioPath));
@@ -341,7 +364,7 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
         if (!values.quiet) io.out(`${formatProxyEvent(e)}\n`);
       },
     });
-    control = await startControl({ store, port: controlPort, holds: proxy });
+    control = await startControl({ store, port: controlPort, holds: proxy, schedule: proxy });
   } catch (err) {
     await proxy?.close();
     return fail(`could not listen: ${(err as Error).message}`);
@@ -386,6 +409,19 @@ export async function httpQueryLog(controlUrl: string): Promise<QueryLog> {
         ...(holds ? { body: JSON.stringify(holds) } : {}),
       });
       if (!res.ok) throw new Error(`deadheat proxy /holds returned ${res.status}`);
+    },
+    async startSchedule(config) {
+      const res = await fetch(`${base}/schedule`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      if (!res.ok) throw new Error(`deadheat proxy /schedule returned ${res.status}`);
+    },
+    async stopSchedule() {
+      const res = await fetch(`${base}/schedule`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`deadheat proxy /schedule returned ${res.status}`);
+      return ((await res.json()) as { order: ScheduleStep[] }).order;
     },
   };
 }

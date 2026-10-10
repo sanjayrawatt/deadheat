@@ -1,14 +1,17 @@
 import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import {
+  cString,
   FrameDecoder,
   GSSENC_REQUEST,
+  readParse,
   SSL_REQUEST,
   startupCode,
   startupParams,
   type Frame,
 } from "./protocol.js";
 import { fingerprint, type HoldRules } from "@deadheat/core";
-import { QueryTracker, type ProxyEvent } from "./tracker.js";
+import { Scheduler, type ScheduleConfig, type ScheduleStep } from "./scheduler.js";
+import { QueryTracker, splitRequestTag, type ProxyEvent } from "./tracker.js";
 
 export type {
   ConnectionCloseEvent,
@@ -26,13 +29,19 @@ export interface ProxyOptions {
   onEvent?: (event: ProxyEvent) => void;
 }
 
-export type { HoldRules };
+export type { HoldRules, ScheduleConfig, ScheduleStep };
 
 export interface RunningProxy {
   port: number;
   /** Start holding (or, with `null`, stop holding) the results of matching reads. */
   setHolds(rules: HoldRules | null): void;
   readonly holds: HoldRules | null;
+  /**
+   * Start scheduling a trial's queries (replacing any running schedule), or with `null` stop.
+   * Returns the release order of the schedule that was stopped.
+   */
+  setSchedule(config: ScheduleConfig | null): ScheduleStep[];
+  readonly schedule: ScheduleConfig | null;
   close(): Promise<void>;
 }
 
@@ -45,6 +54,7 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
   const live = new Set<Socket>();
   let nextId = 1;
   let holds: { rules: HoldRules; set: Set<string> } | null = null;
+  let scheduler: Scheduler | null = null;
 
   // Only queries tagged by the agent are held, so other traffic through the proxy isn't slowed.
   const holdFor = (sql: string, requestId: string | undefined): number =>
@@ -85,6 +95,55 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
       }
     };
 
+    // Client→server frames. A batch the scheduler holds (a Q, or Parse … Sync) waits here until
+    // it is released, and everything after it on this connection queues behind it.
+    interface Segment {
+      frames: Frame[];
+      ready: boolean;
+      owner?: { scheduler: Scheduler; requestId: string };
+    }
+    const inbox: Segment[] = [];
+    let collecting: Segment | undefined;
+    // Who is waiting for each ReadyForQuery still to come: one per forwarded Q or Sync.
+    const readyOwners: (Segment["owner"] | undefined)[] = [];
+
+    const pump = () => {
+      while (inbox[0]?.ready && !closed) {
+        const segment = inbox.shift()!;
+        for (const frame of segment.frames) {
+          tracker.frontend(frame);
+          upstream.write(frame.raw);
+          if (frame.type === "Q" || frame.type === "S") readyOwners.push(segment.owner);
+        }
+      }
+    };
+    const offer = (segment: Segment) => {
+      const { scheduler: s, requestId } = segment.owner!;
+      s.offer(requestId, () => {
+        segment.ready = true;
+        pump();
+      });
+    };
+    const fromClientFrame = (frame: Frame) => {
+      if (collecting) {
+        collecting.frames.push(frame);
+        if (frame.type === "S") {
+          offer(collecting);
+          collecting = undefined;
+        }
+        return;
+      }
+      const requestId = frame.type === "Q" || frame.type === "P" ? taggedId(frame) : undefined;
+      if (scheduler?.matches(requestId)) {
+        const segment: Segment = { frames: [frame], ready: false, owner: { scheduler, requestId } };
+        inbox.push(segment);
+        if (frame.type === "Q") offer(segment);
+        else collecting = segment;
+        return;
+      }
+      inbox.push({ frames: [frame], ready: true });
+    };
+
     const shutdown = () => {
       if (closed) return;
       closed = true;
@@ -121,11 +180,12 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
             ...(params.database ? { database: params.database } : {}),
             ...(params.application_name ? { applicationName: params.application_name } : {}),
           });
+          upstream.write(frame.raw);
         } else {
-          tracker.frontend(frame);
+          fromClientFrame(frame);
         }
-        upstream.write(frame.raw);
       }
+      pump();
     });
 
     upstream.on("data", (chunk: Buffer) => {
@@ -140,6 +200,10 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
         if (holdMs > 0) pausedUntil = Math.max(pausedUntil, performance.now() + holdMs);
         tracker.backend(frame);
         toClient(frame.raw);
+        if (frame.type === "Z") {
+          const owner = readyOwners.shift();
+          owner?.scheduler.finished(owner.requestId);
+        }
       }
     });
 
@@ -163,10 +227,24 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
     get holds() {
       return holds?.rules ?? null;
     },
+    setSchedule(config) {
+      const order = scheduler?.stop() ?? [];
+      scheduler = config ? new Scheduler(config) : null;
+      return order;
+    },
+    get schedule() {
+      return scheduler?.config ?? null;
+    },
     close: () =>
       new Promise<void>((resolve) => {
+        scheduler?.stop();
         for (const socket of live) socket.destroy();
         server.close(() => resolve());
       }),
   };
+}
+
+function taggedId(frame: Frame): string | undefined {
+  const sql = frame.type === "Q" ? cString(frame.payload).value : readParse(frame.payload).sql;
+  return splitRequestTag(sql).requestId;
 }

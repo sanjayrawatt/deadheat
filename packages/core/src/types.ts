@@ -62,6 +62,26 @@ export interface QueryLog {
   take(requestIds: readonly string[]): Promise<Record<string, QueryRecord[]>>;
   /** Asks the proxy to hold the results of these reads (`null` clears all holds). */
   setHolds?(holds: HoldRules | null): Promise<void>;
+  /** Asks the proxy to release one trial's queries one step at a time, in a seeded order. */
+  startSchedule?(config: TrialSchedule): Promise<void>;
+  /** Stops scheduling, releases anything still held, and returns the release order. */
+  stopSchedule?(): Promise<ScheduleStep[]>;
+}
+
+export interface TrialSchedule {
+  /** Request ids starting with this belong to the trial: `<runId>.<trial>.`. */
+  prefix: string;
+  requests: number;
+  seed: number;
+  quietMs?: number;
+  stepTimeoutMs?: number;
+}
+
+/** One query batch the proxy released, in release order. */
+export interface ScheduleStep {
+  requestId: string;
+  /** It didn't finish within the step timeout (probably waiting on a lock), so others went on. */
+  stalled?: boolean;
 }
 
 /** Reads whose results the proxy delays, to widen race windows. */
@@ -98,6 +118,10 @@ export interface TrialResult {
   violation?: string;
   durationMs: number;
   requests: RequestTrace[];
+  /** The order the proxy released this trial's queries in (scheduled runs). */
+  schedule?: ScheduleStep[];
+  /** The seed this trial's schedule used, derived from the run's seed. */
+  seed?: number;
 }
 
 /** Bumped whenever the saved run format changes incompatibly. */
@@ -111,6 +135,8 @@ export interface RunConfig {
   concurrency: number;
   trials: number;
   widenMs?: number;
+  /** Controlled interleaving: the proxy released queries one step at a time. */
+  schedule?: "random";
 }
 
 export interface RunResult {
@@ -127,6 +153,8 @@ export interface RunResult {
   aborted?: string;
   /** Race-window widening that was active, if any (learned from the run's own trials). */
   widen?: HoldRules;
+  /** Seed of a scheduled run. The same seed replays the same release orders. */
+  seed?: number;
 }
 
 /** How a trial's requests are released. `naive` now; `sync` in Week 3; proxy-driven ones later. */

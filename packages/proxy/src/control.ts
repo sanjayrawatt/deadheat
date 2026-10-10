@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { HoldRules } from "./proxy.js";
+import type { HoldRules, ScheduleConfig, ScheduleStep } from "./proxy.js";
 import type { QueryEvent } from "./tracker.js";
 
 /**
@@ -72,10 +72,17 @@ export interface ControlServer {
  *   POST /take  { requestIds: [...] }  → { queries: { [requestId]: QueryEvent[] } }
  *   PUT  /holds { holdMs, fingerprints } → hold matching reads' results (widening)
  *   DELETE /holds                      → stop holding
+ *   PUT  /schedule { prefix, requests, seed, quietMs?, stepTimeoutMs? }
+ *                                      → release that trial's queries one step at a time
+ *   DELETE /schedule                   → stop; { order: ScheduleStep[] }
  */
 export async function startControl(options: {
   store: QueryStore;
   holds?: { setHolds(rules: HoldRules | null): void; readonly holds: HoldRules | null };
+  schedule?: {
+    setSchedule(config: ScheduleConfig | null): ScheduleStep[];
+    readonly schedule: ScheduleConfig | null;
+  };
   port?: number;
   host?: string;
 }): Promise<ControlServer> {
@@ -86,7 +93,38 @@ export async function startControl(options: {
     };
     try {
       if (req.method === "GET" && req.url === "/health") {
-        return send(200, { ok: true, queries: store.size, holds: options.holds?.holds ?? null });
+        return send(200, {
+          ok: true,
+          queries: store.size,
+          holds: options.holds?.holds ?? null,
+          schedule: options.schedule?.schedule ?? null,
+        });
+      }
+      if (req.url === "/schedule" && options.schedule) {
+        if (req.method === "DELETE") {
+          return send(200, { order: options.schedule.setSchedule(null) });
+        }
+        if (req.method === "PUT") {
+          const body = JSON.parse(await readBody(req)) as Partial<ScheduleConfig>;
+          const ms = (v: unknown) =>
+            v === undefined || (typeof v === "number" && v >= 0 && v <= 60_000);
+          const ok =
+            typeof body.prefix === "string" &&
+            body.prefix.length > 0 &&
+            Number.isInteger(body.requests) &&
+            body.requests! > 0 &&
+            Number.isInteger(body.seed) &&
+            ms(body.quietMs) &&
+            ms(body.stepTimeoutMs);
+          if (!ok) {
+            return send(400, {
+              error:
+                "expected { prefix: string, requests: int > 0, seed: int, quietMs?, stepTimeoutMs? (0-60000) }",
+            });
+          }
+          options.schedule.setSchedule(body as ScheduleConfig);
+          return send(200, { schedule: options.schedule.schedule });
+        }
       }
       if (req.url === "/holds" && options.holds) {
         if (req.method === "DELETE") {

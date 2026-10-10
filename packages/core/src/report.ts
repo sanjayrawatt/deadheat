@@ -1,6 +1,8 @@
 import type { QueryRecord, RequestTrace, RunResult, TrialResult } from "./types.js";
 import { staleReadPattern } from "./widen.js";
 
+const MAX_STEPS = 30;
+
 export interface ReportOptions {
   /** How many violating trials to show in detail. */
   maxViolations?: number;
@@ -30,6 +32,10 @@ export function formatRun(run: RunResult, options: ReportOptions = {}): string {
       `  Widened: held the results of ${run.widen.fingerprints.length} decision read(s) for ${run.widen.holdMs}ms`,
       ...run.widen.fingerprints.map((f) => `    ${oneLine(f)}`),
     );
+  }
+
+  if (run.seed !== undefined) {
+    lines.push(`  Scheduled: queries released one at a time in a random order, seed ${run.seed}`);
   }
 
   const failed = run.trials.filter((t) => !t.passed);
@@ -73,6 +79,17 @@ function formatTrial(trial: TrialResult, maxRequests: number): string[] {
     lines.push(`    … ${ordered.length - maxRequests} more requests`);
   }
   lines.push(...formatInterleaving(ordered.slice(0, maxRequests)));
+  if (trial.schedule?.length) {
+    const steps = trial.schedule.map(
+      (s) => `#${s.requestId.slice(s.requestId.lastIndexOf(".") + 1)}${s.stalled ? "*" : ""}`,
+    );
+    const stalled = trial.schedule.some((s) => s.stalled) ? " (* = blocked, others went on)" : "";
+    const shown =
+      steps.length > MAX_STEPS
+        ? `${steps.slice(0, MAX_STEPS).join(" ")} … +${steps.length - MAX_STEPS} more`
+        : steps.join(" ");
+    lines.push(`    Release order (trial seed ${trial.seed}): ${shown}${stalled}`);
+  }
   const stale = staleReadPattern(trial);
   if (stale) {
     lines.push(

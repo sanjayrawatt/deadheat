@@ -55,6 +55,14 @@ describe("deadheat CLI arguments", () => {
     [["run", "x.ts"], /no database/],
     [["run", "x.ts", "--widen", "200"], /--widen needs --proxy/],
     [["run", "x.ts", "--widen", "0", "--proxy", "http://x"], /--widen must be/],
+    [["run", "x.ts", "--schedule", "random"], /--schedule needs --proxy/],
+    [["run", "x.ts", "--schedule", "pct", "--proxy", "http://x"], /--schedule must be "random"/],
+    [
+      ["run", "x.ts", "--schedule", "random", "--proxy", "http://x", "--widen", "100"],
+      /either --widen or --schedule/,
+    ],
+    [["run", "x.ts", "--schedule", "random", "--proxy", "http://x", "--seed=-1"], /--seed must be/],
+    [["run", "x.ts", "--seed", "5"], /--seed only applies/],
     [
       [
         "run",

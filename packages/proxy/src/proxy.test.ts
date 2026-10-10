@@ -228,3 +228,61 @@ describe("holds (race-window widening)", () => {
     expect(proxy.holds).toBeNull();
   });
 });
+
+describe("scheduler (controlled interleaving)", () => {
+  async function trial(prefix: string, seed: number) {
+    proxy.setSchedule({ prefix, requests: 3, seed, quietMs: 30 });
+    try {
+      await Promise.all(
+        [0, 1, 2].map((i) =>
+          withClient(async (c) => {
+            for (const step of [1, 2]) {
+              await c.query(`/* deadheat_rid=${prefix}${i} */ SELECT $1::int AS step`, [step]);
+            }
+          }),
+        ),
+      );
+    } catch (err) {
+      proxy.setSchedule(null);
+      throw err;
+    }
+    return proxy.setSchedule(null);
+  }
+  const indexes = (ids: (string | undefined)[]) => ids.map((id) => id?.split(".").at(-1));
+
+  it("releases a trial's queries one at a time, in the order it recorded", async () => {
+    const order = await trial("s.1.", 11);
+    expect(order).toHaveLength(6);
+    const ran = queries()
+      .filter((q) => q.requestId?.startsWith("s.1."))
+      .sort((a, b) => a.startedAt - b.startedAt);
+    expect(ran.map((q) => q.requestId)).toEqual(order.map((s) => s.requestId));
+    for (let i = 1; i < ran.length; i++) {
+      const prev = ran[i - 1]!;
+      expect(ran[i]!.startedAt).toBeGreaterThanOrEqual(prev.startedAt + prev.durationMs);
+    }
+  });
+
+  it("repeats the same order for the same seed", async () => {
+    const a = await trial("s.2.", 99);
+    const b = await trial("s.3.", 99);
+    expect(indexes(b.map((s) => s.requestId))).toEqual(indexes(a.map((s) => s.requestId)));
+  });
+
+  it("lets untagged queries and other trials through while it holds a step", async () => {
+    proxy.setSchedule({ prefix: "s.4.", requests: 2, seed: 1, quietMs: 5000 });
+    try {
+      const held = withClient((c) => c.query("/* deadheat_rid=s.4.0 */ SELECT 1 AS held"));
+      await withClient(async (c) => {
+        const t = performance.now();
+        await c.query("SELECT 2 AS free");
+        await c.query("/* deadheat_rid=s.5.0 */ SELECT 3 AS other");
+        expect(performance.now() - t).toBeLessThan(500);
+      });
+      expect(proxy.setSchedule(null).map((s) => s.requestId)).toEqual([]);
+      expect((await held).rows).toEqual([{ held: 1 }]);
+    } finally {
+      proxy.setSchedule(null);
+    }
+  });
+});
