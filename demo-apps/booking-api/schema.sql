@@ -13,4 +13,7 @@ CREATE TABLE IF NOT EXISTS bookings (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Seats claimed so far, used only by the `conditional` fix (an atomic counter to update).
+ALTER TABLE slots ADD COLUMN IF NOT EXISTS booked INT NOT NULL DEFAULT 0;
+
 INSERT INTO slots (id, capacity) VALUES (1, 1) ON CONFLICT (id) DO NOTHING;

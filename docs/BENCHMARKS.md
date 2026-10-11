@@ -219,3 +219,38 @@ node packages/cli/dist/bin.js run scenarios/wallet-overdraft.ts --trials 10 --pr
 | barrier | 10/10      | 12.4s                              | **3.7s**        |
 
 The same seed found the same number of violations either way: the probe changes when the next step is released, never which one. It makes lock-heavy runs 2.7–3.4× faster, and every blocked step in the trace now names the request holding the lock. PCT gains less because it mostly runs one request at a time, so it rarely releases a query into a lock held by another request.
+
+## 9. The fix gallery (2026-10-11)
+
+Every variant of both demo apps against every attack, through `deadheat proxy` with the lock monitor, on localhost (no added jitter). 50 trials per burst/widen cell, 20 per scheduled cell (seed 1). `sync` uses settle 50ms. A cell also counts failed requests (5xx or no response), and every cell had none.
+
+```bash
+docker compose up -d --wait && corepack pnpm build
+cd benchmarks && corepack pnpm fix-gallery
+```
+
+booking-api (N=20):
+
+| Variant          | sync burst | widen 200ms | random | pct(3) | barrier |
+| ---------------- | ---------- | ----------- | ------ | ------ | ------- |
+| naive            | 100%       | 100%        | 100%   | 100%   | 100%    |
+| single-statement | 98%        | 100%        | 0%     | 0%     | 100%    |
+| **for-update**   | 0%         | 0%          | 0%     | 0%     | 0%      |
+| **conditional**  | 0%         | 0%          | 0%     | 0%     | 0%      |
+| **serializable** | 0%         | 0%          | 0%     | 0%     | 0%      |
+
+wallet-api (N=10):
+
+| Variant          | sync burst | widen 200ms | random | pct(3) | barrier |
+| ---------------- | ---------- | ----------- | ------ | ------ | ------- |
+| naive            | 100%       | 100%        | 100%   | 50%    | 100%    |
+| lost-update      | 100%       | 100%        | 45%    | 30%    | 100%    |
+| **for-update**   | 0%         | 0%          | 0%     | 0%     | 0%      |
+| **conditional**  | 0%         | 0%          | 0%     | 0%     | 0%      |
+| **serializable** | 0%         | 0%          | 0%     | 0%     | 0%      |
+
+What this shows:
+
+1. Every fix holds against every attack, including the schedulers that release a request's `COMMIT` late on purpose, and none of them pays for it with failed requests. `serializable` retries its aborted transactions invisibly (up to 10 times).
+2. Every bug is found by at least three attacks. Single-statement is again invisible to one-at-a-time scheduling (0%, as in §7), and widening "finds" it at 100% here only because there's no jitter on localhost: burst alone already gets 98%.
+3. The wallet's lost update needs two _different_ senders racing on the same receiver, which random and pct produce less often (45%, 30%) than barrier, which always runs everyone's reads before any write.

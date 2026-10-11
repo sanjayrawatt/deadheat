@@ -28,6 +28,7 @@ let app: FastifyInstance;
 let baseUrl: string;
 let closePool: () => Promise<void>;
 let scenario: Scenario;
+let buildAppFn: typeof import("../src/app.js").buildApp;
 
 beforeAll(async () => {
   const upstream = new URL(DIRECT);
@@ -52,6 +53,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = viaProxy.toString();
   const { applySchema, pool } = await import("../src/db.js");
   const { buildApp } = await import("../src/app.js");
+  buildAppFn = buildApp;
   closePool = () => pool.end();
   await applySchema();
   app = buildApp("naive");
@@ -92,6 +94,51 @@ describe("wallet-api through the scheduling proxy", () => {
       expect(run.durationMs).toBeLessThan(8 * 1500);
       if (run.trials.some((t) => !t.passed && t.schedule!.some((s) => s.blockedBy))) {
         expect(formatRun(run)).toContain("Lock waits (request → holder of the lock it waited on)");
+      }
+    });
+  }
+});
+
+describe("wallet fix gallery: nothing to find", () => {
+  for (const variant of ["for-update", "conditional", "serializable"] as const) {
+    it(`${variant}: no overdraft, money conserved, no failed request under burst, barrier and random`, async () => {
+      const fixed = buildAppFn(variant);
+      const url = await fixed.listen({ port: 0, host: "127.0.0.1" });
+      try {
+        const queryLog = await httpQueryLog(`http://127.0.0.1:${control.port}`);
+        const base = await loadScenario(scenarioPath);
+        const attacks = [
+          { concurrency: 10, trials: 10, options: {} },
+          {
+            concurrency: 6,
+            trials: 5,
+            options: { schedule: { seed: 4, policy: "barrier" as const } },
+          },
+          {
+            concurrency: 4,
+            trials: 5,
+            options: { schedule: { seed: 4, policy: "random" as const } },
+          },
+        ];
+        for (const attack of attacks) {
+          const run = await runScenario(
+            { ...base, actions: { ...base.actions, concurrency: attack.concurrency } },
+            {
+              strategy: createSync({ settleMs: 5 }),
+              sql,
+              baseUrl: url,
+              trials: attack.trials,
+              queryLog,
+              ...attack.options,
+            },
+          );
+          expect(run.aborted).toBeUndefined();
+          expect(run.violations).toBe(0);
+          const requests = run.trials.flatMap((t) => t.requests);
+          expect(requests.filter((r) => r.error || (r.status ?? 0) >= 500)).toEqual([]);
+        }
+      } finally {
+        await fixed.close();
       }
     });
   }

@@ -10,7 +10,8 @@ export default scenario({
   baseUrl: "http://127.0.0.1:4100",
   setup: async ({ sql }) => {
     await sql`DELETE FROM bookings WHERE slot_id = ${SLOT_ID}`;
-    await sql`UPDATE slots SET capacity = ${CAPACITY} WHERE id = ${SLOT_ID}`;
+    // `booked` is the seat counter that booking-api's `conditional` fix updates.
+    await sql`UPDATE slots SET capacity = ${CAPACITY}, booked = 0 WHERE id = ${SLOT_ID}`;
   },
   actions: {
     concurrency: 20,

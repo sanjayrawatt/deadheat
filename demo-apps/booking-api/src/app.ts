@@ -63,7 +63,7 @@ export function buildApp(variant: VariantName): FastifyInstance {
     const capacity = req.body?.capacity ?? 1;
     await pool.query("DELETE FROM bookings WHERE slot_id = $1", [slotId]);
     await pool.query(
-      "INSERT INTO slots (id, capacity) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET capacity = EXCLUDED.capacity",
+      "INSERT INTO slots (id, capacity) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET capacity = EXCLUDED.capacity, booked = 0",
       [slotId, capacity],
     );
     return { slotId, capacity };

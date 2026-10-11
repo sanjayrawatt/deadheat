@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "proxy-overhead": "tsx proxy-overhead.ts",
     "widen-hit-rate": "tsx hit-rate.ts",
+    "fix-gallery": "tsx fix-gallery.ts",
     "schedule-hit-rate": "tsx hit-rate.ts --columns naive,sync,widen,random,pct,barrier --jitters 10"
   },
   "dependencies": {

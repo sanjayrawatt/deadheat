@@ -62,3 +62,56 @@ jobs:
           test "$VIOLATIONS" -gt 0
           test "$TRIALS" = 20
           test -n "$RUN_ID"
+
+  # The same action against a fixed variant must stay green.
+  fixed-stays-green:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: deadheat
+          POSTGRES_PASSWORD: deadheat
+          POSTGRES_DB: deadheat
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U deadheat"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DEADHEAT_DATABASE_URL: postgres://deadheat:deadheat@localhost:55432/deadheat
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Start the booking API with the FOR UPDATE fix
+        run: |
+          (cd demo-apps/booking-api && BOOKING_VARIANT=for-update pnpm start > "$RUNNER_TEMP/booking.log" 2>&1 &)
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://127.0.0.1:4100/ && exit 0
+            sleep 0.5
+          done
+          cat "$RUNNER_TEMP/booking.log"
+          exit 1
+      - name: Run Deadheat through the action
+        id: deadheat
+        uses: ./
+        with:
+          scenario: scenarios/booking-oversell.ts
+          trials: 20
+          artifact-name: deadheat-runs-fixed
+      - name: It reported a clean run
+        env:
+          VIOLATIONS: ${{ steps.deadheat.outputs.violations }}
+          TRIALS: ${{ steps.deadheat.outputs.trials }}
+        run: |
+          echo "violations=$VIOLATIONS/$TRIALS"
+          test "$VIOLATIONS" = 0
+          test "$TRIALS" = 20

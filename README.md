@@ -110,10 +110,18 @@ Other inputs: `strategy`, `settle`, `base-url`, `proxy`, `schedule`, `seed`, `wi
 
 ## Demo apps
 
-| App                                  | Port | Variants (`*_VARIANT` env)                         | Invariant it breaks          |
-| ------------------------------------ | ---- | -------------------------------------------------- | ---------------------------- |
-| [booking-api](demo-apps/booking-api) | 4100 | `naive`, `single-statement`                        | bookings ≤ capacity          |
-| [wallet-api](demo-apps/wallet-api)   | 4200 | `naive` (overdraft), `lost-update` (money created) | balance ≥ 0, total conserved |
+| App                                  | Port | Buggy variants (`*_VARIANT` env)                   | Fixes                                       | Invariant                    |
+| ------------------------------------ | ---- | -------------------------------------------------- | ------------------------------------------- | ---------------------------- |
+| [booking-api](demo-apps/booking-api) | 4100 | `naive`, `single-statement`                        | `for-update`, `conditional`, `serializable` | bookings ≤ capacity          |
+| [wallet-api](demo-apps/wallet-api)   | 4200 | `naive` (overdraft), `lost-update` (money created) | `for-update`, `conditional`, `serializable` | balance ≥ 0, total conserved |
+
+**The fix gallery.** Each fix is a standard answer to "how do you prevent a double booking / double spend?":
+
+- `for-update`: lock the row you check with `SELECT … FOR UPDATE` (the wallet locks both accounts in id order, so opposite transfers can't deadlock).
+- `conditional`: make the check part of the write, `UPDATE … SET booked = booked + 1 WHERE id = $1 AND booked < capacity` (or `balance = balance - $2 WHERE balance >= $2`), then look at the affected rows.
+- `serializable`: keep the naive code, run it at `SERIALIZABLE`, and retry on serialization failures.
+
+Deadheat breaks every buggy variant and finds nothing in any fix, under every attack, with no failed requests ([BENCHMARKS.md §9](docs/BENCHMARKS.md)).
 
 ## License
 

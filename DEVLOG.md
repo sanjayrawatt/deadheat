@@ -152,3 +152,14 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - Composite action that builds Deadheat from its own checkout, because it isn't on npm yet, and symlinks `node_modules/deadheat` so scenario files can import it. The step fails on a violation, exposes `violations`/`run-id` outputs, and uploads the runs on failure.
 - Before pushing I simulated both `run:` blocks locally, from a separate workspace with no `node_modules`: `"deadheat"` resolved through the symlink, 9/10 violations, outputs written, exit codes 1 (violated) and 2 (bad scenario path). Prettier caught a real YAML error first: an unquoted description containing `(default: …)` parses as a nested mapping.
 - `.github/workflows/action-selftest.yml` runs the action against the buggy booking API on every push and asserts that it went red.
+
+## Week 12 (Dec 14 – Dec 20, 2026)
+
+### 2026-10-11: the fix gallery
+
+- Three fixes per app: `for-update`, `conditional` and `serializable` (with retry on 40001/40P01). Booking's `conditional` needed something to update atomically, so `slots` gained a `booked` counter, which the scenario setup and `/reset` zero.
+- **Proof that "nothing found" means fixed:** the gallery benchmark and the e2e tests also count 5xx and missing responses, and booking requires exactly one `201` per trial. Every fix: 0% under burst, widen, random, pct and barrier, with 0 failed requests ([BENCHMARKS.md §9](docs/BENCHMARKS.md)). Every buggy variant is found by at least three attacks.
+- The wallet's `for-update` locks both accounts in one statement, ordered by id. Locking them one at a time in from/to order is the classic way to make two opposite transfers deadlock.
+- Left out on purpose: `CHECK (balance >= 0)`, which would apply to the shared table and hide the buggy variants, and `redis-lua`, which needs Redis.
+- The Action self-test now has a second job: the same action against `for-update` must stay green.
+- 174 tests.

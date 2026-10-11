@@ -182,7 +182,13 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
 - Dogfooded by `.github/workflows/action-selftest.yml`: it starts the buggy booking API, runs `uses: ./` with `continue-on-error`, and asserts that the step failed and reported violations. It was simulated locally from a separate workspace with no `node_modules` before the first push.
 - Once Deadheat is on npm (Week 13–14), the build step becomes `npm i deadheat@<version>`.
 
-**Next (Week 12):** the fix gallery: correct variants of both demo apps (row lock, conditional write, constraint, serializable + retry), each proven clean by every policy.
+**Built in Week 12** (fix gallery):
+
+- **booking-api:** `for-update` (lock the slot row, then count and insert), `conditional` (claim a seat with `UPDATE slots SET booked = booked + 1 WHERE id = $1 AND booked < capacity` and insert only if a row changed; `booked` is a new counter column, reset by the scenario's setup and by `/reset`), `serializable` (the naive code at SERIALIZABLE, retried on 40001/40P01 up to 10 times).
+- **wallet-api:** `for-update` (lock both accounts in id order, one statement), `conditional` (debit with `balance = balance - $2 WHERE id = $1 AND balance >= $2`, then a relative credit; insufficient funds rolls back), `serializable` (the lost-update code at SERIALIZABLE with retry).
+- Not added: `CHECK (balance >= 0)`, because it would apply to the shared table and hide the buggy variants; and `redis-lua`, which needs Redis in the stack.
+- **"Nothing found" must mean something:** the gallery benchmark and the e2e tests also count failed requests (5xx or no response), and booking checks exactly one `201` per trial. A "fix" that just makes requests fail can't pass.
+- The Action self-test gained a second job: the same action against `for-update` must stay green.
 
 ## 6. Report format
 

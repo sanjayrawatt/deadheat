@@ -331,3 +331,53 @@ describe("booking-api through the proxy", () => {
     }
   });
 });
+
+describe("booking fix gallery: nothing to find", () => {
+  for (const variant of ["for-update", "conditional", "serializable"] as const) {
+    it(`${variant}: no oversell and no failed request under burst, barrier and random`, async () => {
+      const fixed = buildAppFn(variant);
+      const url = await fixed.listen({ port: 0, host: "127.0.0.1" });
+      try {
+        const base = await loadScenario(scenarioPath);
+        const queryLog = await httpQueryLog(`http://127.0.0.1:${control.port}`);
+        const attacks = [
+          { concurrency: 20, trials: 10, options: {} },
+          {
+            concurrency: 8,
+            trials: 5,
+            options: { schedule: { seed: 3, policy: "barrier" as const } },
+          },
+          {
+            concurrency: 4,
+            trials: 5,
+            options: { schedule: { seed: 3, policy: "random" as const } },
+          },
+        ];
+        for (const attack of attacks) {
+          const scenario = {
+            ...base,
+            actions: { ...base.actions, concurrency: attack.concurrency },
+          };
+          const run = await runScenario(scenario, {
+            strategy: naive,
+            sql,
+            baseUrl: url,
+            trials: attack.trials,
+            queryLog,
+            ...attack.options,
+          });
+          expect(run.aborted).toBeUndefined();
+          expect(run.violations).toBe(0);
+          const requests = run.trials.flatMap((t) => t.requests);
+          expect(requests.filter((r) => r.error || (r.status ?? 0) >= 500)).toEqual([]);
+          // Exactly one booking per trial: someone got the seat, everyone else was told it's full.
+          for (const t of run.trials) {
+            expect(t.requests.filter((r) => r.status === 201)).toHaveLength(1);
+          }
+        }
+      } finally {
+        await fixed.close();
+      }
+    });
+  }
+});

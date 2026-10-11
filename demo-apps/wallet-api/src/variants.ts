@@ -45,6 +45,63 @@ export const variants = {
       await db.query("UPDATE accounts SET balance = $2 WHERE id = $1", [toId, to + amount]);
       return { kind: "done", transferId: await record(db, fromId, toId, amount) };
     }),
+
+  // FIX, pessimistic locks: lock both rows before reading them. Always in id order, so two
+  // transfers in opposite directions can't each hold one lock and wait for the other.
+  "for-update": (fromId, toId, amount) =>
+    inTransaction(async (db) => {
+      const locked = await db.query<{ id: number; balance: number }>(
+        "SELECT id, balance FROM accounts WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE",
+        [[fromId, toId]],
+      );
+      const from = locked.rows.find((r) => r.id === fromId)?.balance;
+      const to = locked.rows.find((r) => r.id === toId)?.balance;
+      if (from === undefined || to === undefined) return { kind: "account-not-found" };
+      if (from < amount) return { kind: "insufficient-funds" };
+
+      await db.query("UPDATE accounts SET balance = $2 WHERE id = $1", [fromId, from - amount]);
+      await db.query("UPDATE accounts SET balance = $2 WHERE id = $1", [toId, to + amount]);
+      return { kind: "done", transferId: await record(db, fromId, toId, amount) };
+    }),
+
+  // FIX, conditional write: the debit checks the balance in the same statement that changes
+  // it, and the credit is relative. Postgres re-evaluates the WHERE on the latest row version,
+  // so two debits can't both pass, and no credit overwrites another.
+  conditional: (fromId, toId, amount) =>
+    inTransaction(async (db) => {
+      const debited = await db.query(
+        "UPDATE accounts SET balance = balance - $2 WHERE id = $1 AND balance >= $2",
+        [fromId, amount],
+      );
+      if (!debited.rowCount) {
+        const exists = await db.query("SELECT 1 FROM accounts WHERE id = $1", [fromId]);
+        throw new Rollback(
+          exists.rowCount ? { kind: "insufficient-funds" } : { kind: "account-not-found" },
+        );
+      }
+      const credited = await db.query("UPDATE accounts SET balance = balance + $2 WHERE id = $1", [
+        toId,
+        amount,
+      ]);
+      if (!credited.rowCount) throw new Rollback({ kind: "account-not-found" });
+      return { kind: "done", transferId: await record(db, fromId, toId, amount) };
+    }),
+
+  // FIX, SERIALIZABLE: the lost-update code unchanged, at SERIALIZABLE, retried when Postgres
+  // aborts it (40001) or picks it as a deadlock victim (40P01).
+  serializable: (fromId, toId, amount) =>
+    withRetry(() =>
+      inTransaction(async (db) => {
+        const from = await balanceOf(db, fromId);
+        const to = await balanceOf(db, toId);
+        if (from === undefined || to === undefined) return { kind: "account-not-found" };
+        if (from < amount) return { kind: "insufficient-funds" };
+
+        await db.query("UPDATE accounts SET balance = $2 WHERE id = $1", [fromId, from - amount]);
+        await db.query("UPDATE accounts SET balance = $2 WHERE id = $1", [toId, to + amount]);
+        return { kind: "done", transferId: await record(db, fromId, toId, amount) };
+      }, "BEGIN ISOLATION LEVEL SERIALIZABLE"),
+    ),
 } satisfies Record<string, TransferFn>;
 
 export type VariantName = keyof typeof variants;
@@ -53,18 +110,40 @@ export function isVariantName(name: string): name is VariantName {
   return Object.hasOwn(variants, name);
 }
 
-async function inTransaction<T>(fn: (db: PoolClient) => Promise<T>): Promise<T> {
+// Ends the transaction with ROLLBACK but still returns a normal result (e.g. insufficient funds
+// after a debit that matched no row).
+class Rollback {
+  constructor(readonly result: TransferResult) {}
+}
+
+async function inTransaction<T extends TransferResult>(
+  fn: (db: PoolClient) => Promise<T>,
+  begin = "BEGIN",
+): Promise<T | TransferResult> {
   const db = await pool.connect();
   try {
-    await db.query("BEGIN");
+    await db.query(begin);
     const result = await fn(db);
     await db.query("COMMIT");
     return result;
   } catch (err) {
-    await db.query("ROLLBACK");
+    await db.query("ROLLBACK").catch(() => {});
+    if (err instanceof Rollback) return err.result;
     throw err;
   } finally {
     db.release();
+  }
+}
+
+const RETRYABLE = new Set(["40001", "40P01"]); // serialization failure, deadlock detected
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 10): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i >= attempts || !RETRYABLE.has((err as { code?: string }).code ?? "")) throw err;
+    }
   }
 }
 
