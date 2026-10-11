@@ -92,6 +92,22 @@ Both requests counted 0 bookings before either inserted: check-then-act on a sta
 
 **Look again later:** every run is saved to `.deadheat/runs/<run-id>.json`. `deadheat show` prints the latest one again, and `deadheat show <run-id> --trial 3` prints trial 3 in full, with every request and all of its SQL in order.
 
+## Use it in CI
+
+The repo is also a GitHub Action. The job fails when the invariant breaks, and the saved runs are uploaded as an artifact so you can `show`, `replay` or `shrink` them locally.
+
+```yaml
+- name: Start the API (and Postgres) however you normally do
+  run: ...
+- uses: sanjayrawatt/deadheat@main # pin a commit or tag
+  with:
+    scenario: scenarios/booking-oversell.ts
+    trials: 50
+    database-url: postgres://user:pass@localhost:5432/app
+```
+
+Other inputs: `strategy`, `settle`, `base-url`, `proxy`, `schedule`, `seed`, `widen` and `args` (extra flags). Outputs: `violations`, `trials`, `run-id` and `run-file`. Deadheat isn't on npm yet, so the action builds itself from its own checkout on first use. [.github/workflows/action-selftest.yml](.github/workflows/action-selftest.yml) runs it against the buggy booking API on every push.
+
 ## Demo apps
 
 | App                                  | Port | Variants (`*_VARIANT` env)                         | Invariant it breaks          |

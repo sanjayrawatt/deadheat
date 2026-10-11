@@ -1,0 +1,144 @@
+name: Deadheat
+description: Find the race conditions in your API before your users do. Fails the job when the scenario's invariant breaks.
+author: Sanjay Singh Rawat
+branding:
+  icon: zap
+  color: red
+
+inputs:
+  scenario:
+    description: "Path to the scenario file (.ts or .js), relative to the workspace."
+    required: true
+  strategy:
+    description: "naive or sync."
+    required: false
+  trials:
+    description: "Number of trials (default: the scenario's own, else 100)."
+    required: false
+  settle:
+    description: "sync only. Milliseconds between priming and release; use ~50 behind a proxy."
+    required: false
+  base-url:
+    description: "Override the scenario's baseUrl."
+    required: false
+  database-url:
+    description: "Database for setup and invariant checks. Defaults to the DEADHEAT_DATABASE_URL env var."
+    required: false
+  proxy:
+    description: "Control URL of a running `deadheat proxy`, to record SQL and to schedule or widen."
+    required: false
+  schedule:
+    description: "random, pct or barrier (needs proxy)."
+    required: false
+  seed:
+    description: "Seed for schedule."
+    required: false
+  widen:
+    description: "Hold decision reads for this many ms (needs proxy)."
+    required: false
+  args:
+    description: "Extra flags for `deadheat run`, as one string."
+    required: false
+  node-version:
+    description: "Node.js version to run Deadheat with."
+    required: false
+    default: "22"
+  upload-runs:
+    description: "Upload .deadheat/runs as an artifact when the job fails."
+    required: false
+    default: "true"
+  artifact-name:
+    description: "Name of that artifact (make it unique if the action runs twice in one job)."
+    required: false
+    default: deadheat-runs
+
+outputs:
+  violations:
+    description: "How many trials broke the invariant."
+    value: ${{ steps.run.outputs.violations }}
+  trials:
+    description: "How many trials ran."
+    value: ${{ steps.run.outputs.trials }}
+  run-id:
+    description: "The run's id (replay it with `deadheat replay <run-id>`)."
+    value: ${{ steps.run.outputs.run-id }}
+  run-file:
+    description: "Path of the saved run (.deadheat/runs/<run-id>.json)."
+    value: ${{ steps.run.outputs.run-file }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    # Deadheat isn't on npm yet, so the action builds its own checkout once.
+    - name: Build Deadheat
+      shell: bash
+      env:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      run: |
+        cd "$GITHUB_ACTION_PATH"
+        if [ ! -f packages/cli/dist/bin.js ]; then
+          corepack pnpm install --frozen-lockfile --filter "deadheat..."
+          corepack pnpm --filter "deadheat..." build
+        fi
+        # Scenario files `import { scenario } from "deadheat"`.
+        if [ ! -e "$GITHUB_WORKSPACE/node_modules/deadheat" ]; then
+          mkdir -p "$GITHUB_WORKSPACE/node_modules"
+          ln -s "$GITHUB_ACTION_PATH/packages/cli" "$GITHUB_WORKSPACE/node_modules/deadheat"
+        fi
+
+    - name: Run Deadheat
+      id: run
+      shell: bash
+      env:
+        SCENARIO: ${{ inputs.scenario }}
+        STRATEGY: ${{ inputs.strategy }}
+        TRIALS: ${{ inputs.trials }}
+        SETTLE: ${{ inputs.settle }}
+        BASE_URL: ${{ inputs.base-url }}
+        DATABASE_URL_INPUT: ${{ inputs.database-url }}
+        PROXY: ${{ inputs.proxy }}
+        SCHEDULE: ${{ inputs.schedule }}
+        SEED: ${{ inputs.seed }}
+        WIDEN: ${{ inputs.widen }}
+        EXTRA_ARGS: ${{ inputs.args }}
+      run: |
+        args=(run "$SCENARIO")
+        [ -n "$STRATEGY" ] && args+=(--strategy "$STRATEGY")
+        [ -n "$TRIALS" ] && args+=(--trials "$TRIALS")
+        [ -n "$SETTLE" ] && args+=(--settle "$SETTLE")
+        [ -n "$BASE_URL" ] && args+=(--base-url "$BASE_URL")
+        [ -n "$DATABASE_URL_INPUT" ] && args+=(--database-url "$DATABASE_URL_INPUT")
+        [ -n "$PROXY" ] && args+=(--proxy "$PROXY")
+        [ -n "$SCHEDULE" ] && args+=(--schedule "$SCHEDULE")
+        [ -n "$SEED" ] && args+=(--seed "$SEED")
+        [ -n "$WIDEN" ] && args+=(--widen "$WIDEN")
+        read -r -a extra <<< "$EXTRA_ARGS"
+
+        set +e
+        node "$GITHUB_ACTION_PATH/packages/cli/dist/bin.js" "${args[@]}" "${extra[@]}" | tee "$RUNNER_TEMP/deadheat.out"
+        code=${PIPESTATUS[0]}
+        set -e
+
+        file=$(sed -n 's/^  Saved: //p' "$RUNNER_TEMP/deadheat.out" | tail -1)
+        if [ -n "$file" ] && [ -f "$file" ]; then
+          node -e '
+            const run = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            console.log(`violations=${run.violations}`);
+            console.log(`trials=${run.trials.length}`);
+            console.log(`run-id=${run.runId}`);
+            console.log(`run-file=${process.argv[1]}`);
+          ' "$file" >> "$GITHUB_OUTPUT"
+        fi
+        exit "$code"
+
+    - name: Upload the saved runs
+      if: failure() && inputs.upload-runs == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: .deadheat/runs
+        if-no-files-found: ignore

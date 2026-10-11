@@ -145,3 +145,10 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - **Bug found by using it:** the second shrink in my session silently worked on the _first_ shrink's output. "Latest run" sorted file names, and two runs saved in the same second sort by their random suffix. It now sorts by file modification time, with a test that saves the "smaller" id last.
 - In the e2e test I used barrier, not random, for the run being shrunk. With 2 requests random hits about 1 in 3, so 4 attempts would miss a real 2-request violation about 20% of the time and the test would be flaky. The tool's output is honest about this ("passes (n attempts)"). The e2e looped 8/8.
 - 168 tests.
+
+### 2026-10-11: the GitHub Action
+
+- Decision (Sanjay): the action lives in this repo as `action.yml`, not in a separate `deadheat-action` repo, so code and action are versioned together.
+- Composite action that builds Deadheat from its own checkout, because it isn't on npm yet, and symlinks `node_modules/deadheat` so scenario files can import it. The step fails on a violation, exposes `violations`/`run-id` outputs, and uploads the runs on failure.
+- Before pushing I simulated both `run:` blocks locally, from a separate workspace with no `node_modules`: `"deadheat"` resolved through the symlink, 9/10 violations, outputs written, exit codes 1 (violated) and 2 (bad scenario path). Prettier caught a real YAML error first: an unquoted description containing `(default: …)` parses as a nested mapping.
+- `.github/workflows/action-selftest.yml` runs the action against the buggy booking API on every push and asserts that it went red.

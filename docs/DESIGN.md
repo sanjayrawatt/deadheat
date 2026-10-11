@@ -175,7 +175,14 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
 - Measured: booking (single-statement, barrier) 20 → 2 requests in 1s; wallet lost update (random and barrier) 10 → 2 (one transfer from each sender) in 1–3s. All three shrunk runs replayed and reproduced.
 - "Latest run" (`show`/`replay`/`shrink` with no id) is now picked by file time. Run ids only have whole seconds, so a shrink result and the next run, saved in the same second, sorted by their random suffix.
 
-**Next:** the GitHub Action (repo decision pending), then the fix gallery (Week 12).
+**GitHub Action** (Week 11, `action.yml` at the repo root, so it's used as `sanjayrawatt/deadheat@<ref>`):
+
+- Composite action. Deadheat isn't on npm yet, so it installs and builds its own checkout (`github.action_path`, filtered to `deadheat...`), and skips that when `dist` already exists. Scenario files import `"deadheat"`, so if the workspace has no `node_modules/deadheat`, the action symlinks it to its own `packages/cli`. Node resolves the package's own dependencies from the real path.
+- Inputs mirror `deadheat run`. Values pass through `env`, never interpolated into the script. The step's exit code is the CLI's (1 = violated, 2 = error), so a violating PR goes red. Outputs (`violations`, `trials`, `run-id`, `run-file`) are read from the saved run. On failure `.deadheat/runs` is uploaded with `actions/upload-artifact@v7`.
+- Dogfooded by `.github/workflows/action-selftest.yml`: it starts the buggy booking API, runs `uses: ./` with `continue-on-error`, and asserts that the step failed and reported violations. It was simulated locally from a separate workspace with no `node_modules` before the first push.
+- Once Deadheat is on npm (Week 13–14), the build step becomes `npm i deadheat@<version>`.
+
+**Next (Week 12):** the fix gallery: correct variants of both demo apps (row lock, conditional write, constraint, serializable + retry), each proven clean by every policy.
 
 ## 6. Report format
 

@@ -1,0 +1,64 @@
+name: Action self-test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  finds-oversell:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: deadheat
+          POSTGRES_PASSWORD: deadheat
+          POSTGRES_DB: deadheat
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U deadheat"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DEADHEAT_DATABASE_URL: postgres://deadheat:deadheat@localhost:55432/deadheat
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Start the buggy booking API
+        run: |
+          (cd demo-apps/booking-api && pnpm start > "$RUNNER_TEMP/booking.log" 2>&1 &)
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://127.0.0.1:4100/ && exit 0
+            sleep 0.5
+          done
+          cat "$RUNNER_TEMP/booking.log"
+          exit 1
+      # The step is expected to fail: the API oversells. The next step checks that it did.
+      - name: Run Deadheat through the action
+        id: deadheat
+        uses: ./
+        continue-on-error: true
+        with:
+          scenario: scenarios/booking-oversell.ts
+          trials: 20
+          artifact-name: deadheat-runs-selftest
+      - name: The action failed the step and reported the violations
+        env:
+          OUTCOME: ${{ steps.deadheat.outcome }}
+          VIOLATIONS: ${{ steps.deadheat.outputs.violations }}
+          TRIALS: ${{ steps.deadheat.outputs.trials }}
+          RUN_ID: ${{ steps.deadheat.outputs.run-id }}
+        run: |
+          echo "outcome=$OUTCOME violations=$VIOLATIONS/$TRIALS run=$RUN_ID"
+          test "$OUTCOME" = failure
+          test "$VIOLATIONS" -gt 0
+          test "$TRIALS" = 20
+          test -n "$RUN_ID"
