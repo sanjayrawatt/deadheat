@@ -43,6 +43,8 @@ export interface RunOptions {
     quietMs?: number;
     stepTimeoutMs?: number;
   };
+  /** Stop after the first violating trial (shrinking only needs to know that one exists). */
+  stopOnViolation?: boolean;
   /** Called after every trial, e.g. to print progress. */
   onTrial?: (result: TrialResult) => void;
 }
@@ -167,6 +169,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       if (!trialResult.passed) result.violations++;
       result.trials.push(trialResult);
       options.onTrial?.(trialResult);
+      if (options.stopOnViolation && !trialResult.passed) break;
 
       if (widen) {
         const before = learned.size;

@@ -152,8 +152,10 @@ describe("deadheat show", () => {
   beforeAll(async () => {
     showDir = await mkdtemp(join(tmpdir(), "deadheat-show-"));
     await mkdir(join(showDir, ".deadheat", "runs"), { recursive: true });
-    for (const r of [run("run-20261010T100000-aaaa"), run("run-20261010T110000-bbbb")]) {
+    // Saved in this order; the second has the "smaller" id, as when two runs share a second.
+    for (const r of [run("run-20261010T110000-bbbb"), run("run-20261010T110000-aaaa")]) {
       await writeFile(join(showDir, ".deadheat", "runs", `${r.runId}.json`), JSON.stringify(r));
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
     await writeFile(
       join(showDir, "future.json"),
@@ -168,16 +170,16 @@ describe("deadheat show", () => {
     return t;
   };
 
-  it("prints the latest saved run by default", async () => {
+  it("prints the latest saved run by default, by save time", async () => {
     const t = showIo();
     expect(await main(["show"], t.io)).toBe(EXIT_OK);
     expect(t.out()).toContain("1/2 trials violated");
-    expect(t.out()).toContain("run-20261010T110000-bbbb");
+    expect(t.out()).toContain("run-20261010T110000-aaaa");
   });
 
   it("prints one trial in full by run id", async () => {
     const t = showIo();
-    expect(await main(["show", "run-20261010T100000-aaaa", "--trial", "2"], t.io)).toBe(EXIT_OK);
+    expect(await main(["show", "run-20261010T110000-aaaa", "--trial", "2"], t.io)).toBe(EXIT_OK);
     expect(t.out()).toContain("Trial 2: bookings = 2, capacity = 1");
     expect(t.out()).toContain("SQL, in the order it ran:");
   });
@@ -194,11 +196,13 @@ describe("deadheat show", () => {
   });
 
   it.each([
-    [["replay", "run-20261010T100000-aaaa"], /replay needs --proxy/],
+    [["replay", "run-20261010T110000-aaaa"], /replay needs --proxy/],
     [
-      ["replay", "run-20261010T100000-aaaa", "--proxy", "http://x", "--trial", "1"],
+      ["replay", "run-20261010T110000-aaaa", "--proxy", "http://x", "--trial", "1"],
       /scenario file/,
     ],
+    [["shrink", "run-20261010T110000-aaaa"], /scenario file/],
+    [["shrink", "--attempts", "0"], /--attempts must be/],
   ])("replay %j fails with a clear message", async (argv, message) => {
     const t = showIo();
     expect(await main(argv, t.io)).toBe(EXIT_ERROR);

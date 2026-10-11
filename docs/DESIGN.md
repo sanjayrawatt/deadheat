@@ -166,7 +166,16 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
 - **Report:** `Lock waits (request → holder of the lock it waited on): #1 → #0; …`.
 - Without a monitor connection, the proxy says so at start, and steps are still released after the 100ms timeout.
 
-**Next (Week 11):** shrinking a violating trial to the fewest requests (and steps) that still break the invariant, and the GitHub Action.
+**Built in Week 11** (shrinking, `deadheat shrink [run-id] [--attempts n] [--proxy url]`):
+
+- **What shrinks:** the set of requests, by original index. In a candidate subset each request keeps its own body: request j is `scenario.actions.request(subset[j])`.
+- **Test of a candidate:** up to `--attempts` trials (default 5) with the run's strategy, schedule policy and seed. The runner stops at the first violation (`stopOnViolation`). Runs are flaky by nature, so "passes" means "didn't violate in n attempts", and the output says which attempt violated.
+- **Search:** ddmin over complements (Zeller). Split the set into n chunks and try dropping each one. A success keeps the rest and sets n to max(n − 1, 2); otherwise n doubles, until chunks are single requests. The result is 1-minimal: dropping any one request made it pass. `shrinkRequests` is pure and unit-tested without a database.
+- **Result:** the final violating run is saved with `config.requests` (original indexes) and `config.shrunkFrom`. The report maps `#j here = #i there`, and `deadheat replay` rebuilds the same subset, so the minimal repro replays.
+- Measured: booking (single-statement, barrier) 20 → 2 requests in 1s; wallet lost update (random and barrier) 10 → 2 (one transfer from each sender) in 1–3s. All three shrunk runs replayed and reproduced.
+- "Latest run" (`show`/`replay`/`shrink` with no id) is now picked by file time. Run ids only have whole seconds, so a shrink result and the next run, saved in the same second, sorted by their random suffix.
+
+**Next:** the GitHub Action (repo decision pending), then the fix gallery (Week 12).
 
 ## 6. Report format
 

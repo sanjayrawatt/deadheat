@@ -162,6 +162,13 @@ export interface RunConfig {
   schedule?: SchedulePolicy;
   /** PCT depth, when `schedule` is `pct`. */
   depth?: number;
+  /**
+   * Which of the scenario's requests ran, by their original index: request j of this run is
+   * `scenario.actions.request(requests[j])`. Set on shrunk runs; otherwise 0..concurrency-1.
+   */
+  requests?: number[];
+  /** The run and trial this one was shrunk from. */
+  shrunkFrom?: { runId: string; trial: number };
 }
 
 export interface RunResult {

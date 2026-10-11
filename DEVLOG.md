@@ -135,3 +135,13 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - New e2e: the wallet through the scheduling proxy (random and barrier). Every blocked step has a named lock holder.
 - A repeat of a mistake from the Toxiproxy investigation: `zsh` doesn't word-split `$1`, so my measurement script passed `--monitor-url <url>` as one unknown option. Passing the flag and the value as separate words fixes it. Writing it down so it doesn't happen a third time.
 - 157 tests.
+
+## Week 11 (Dec 7 – Dec 13, 2026)
+
+### 2026-10-11: shrinking
+
+- `deadheat shrink` runs ddmin over the violating trial's requests, keeps the smallest subset that still violates within `--attempts` tries, and saves it as a run that `show` and `replay` understand (`config.requests` maps the subset to the original indexes).
+- Booking oversell, 20 requests under barrier: down to 2 in 1s. Wallet lost update, 10 requests: down to 2 in 1–3s, one transfer from each sender to the same receiver, which is exactly the bug's shape. The shrunk runs replay and reproduce.
+- **Bug found by using it:** the second shrink in my session silently worked on the _first_ shrink's output. "Latest run" sorted file names, and two runs saved in the same second sort by their random suffix. It now sorts by file modification time, with a test that saves the "smaller" id last.
+- In the e2e test I used barrier, not random, for the run being shrunk. With 2 requests random hits about 1 in 3, so 4 attempts would miss a real 2-request violation about 20% of the time and the test would be flaky. The tool's output is honest about this ("passes (n attempts)"). The e2e looped 8/8.
+- 168 tests.

@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -11,6 +11,8 @@ import {
   replayOrder,
   runScenario,
   RUN_FORMAT_VERSION,
+  shrinkRequests,
+  withRequests,
   strategies,
   VERSION,
   type QueryLog,
@@ -59,6 +61,7 @@ Usage:
   deadheat proxy [options]                 sit between an app and Postgres, print every query
   deadheat show [run-id | file.json]       print a saved run again (default: the latest)
   deadheat replay [run-id | file.json]     re-run one saved trial with its recorded query order
+  deadheat shrink [run-id | file.json]     find the fewest requests that still break the invariant
 
 Run options:
   --strategy <name>      ${Object.keys(strategies).join(" | ")} (default: sync)
@@ -87,6 +90,11 @@ Show options:
   --trial <n>            print trial <n> in full: every request and all of its SQL, in order
   --verbose              list every violating trial in full
 
+Shrink options:
+  --attempts <n>         trials per candidate set before calling it "passes" (default 5)
+  --proxy <url>          needed if the run was scheduled; also records SQL so the result replays
+  --base-url, --database-url   as for run
+
 Replay options:
   --trial <n>            which trial (default: the first violating one)
   --proxy <url>          required: the proxy forces the recorded order
@@ -111,6 +119,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
   if (argv[0] === "proxy") return proxyCommand(argv.slice(1), io);
   if (argv[0] === "show") return showCommand(argv.slice(1), io);
   if (argv[0] === "replay") return replayCommand(argv.slice(1), io);
+  if (argv[0] === "shrink") return shrinkCommand(argv.slice(1), io);
   let parsed;
   try {
     parsed = parseArgs({
@@ -242,13 +251,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     io.err("\n");
     io.out(`${formatRun(run, values.verbose ? { maxViolations: Infinity } : {})}\n`);
 
-    if (values.save) {
-      const dir = join(io.cwd, ".deadheat", "runs");
-      await mkdir(dir, { recursive: true });
-      const file = join(dir, `${run.runId}.json`);
-      await writeFile(file, `${JSON.stringify(run, null, 2)}\n`);
-      io.out(`  Saved: ${file}\n`);
-    }
+    if (values.save) io.out(`  Saved: ${await saveRun(run, io)}\n`);
 
     if (run.aborted) return EXIT_ERROR;
     return run.violations ? EXIT_VIOLATION : EXIT_OK;
@@ -311,11 +314,17 @@ async function loadRun(target: string | undefined, io: Io): Promise<{ run: RunRe
   const dir = join(io.cwd, ".deadheat", "runs");
   let file: string;
   if (!target) {
-    const names = (await readdir(dir).catch(() => [] as string[]))
-      .filter((n) => n.endsWith(".json"))
-      .sort();
+    // By modification time: run ids only have whole seconds, so two runs saved in the same
+    // second (e.g. a shrink and the run after it) would otherwise sort by their random suffix.
+    const names = (await readdir(dir).catch(() => [] as string[])).filter((n) =>
+      n.endsWith(".json"),
+    );
     if (!names.length) return `no saved runs in ${dir}`;
-    file = join(dir, names.at(-1)!);
+    const dated = await Promise.all(
+      names.map(async (n) => ({ n, at: (await stat(join(dir, n))).mtimeMs })),
+    );
+    dated.sort((a, b) => a.at - b.at || (a.n < b.n ? -1 : 1));
+    file = join(dir, dated.at(-1)!.n);
   } else {
     file = target.endsWith(".json") ? resolve(io.cwd, target) : join(dir, `${target}.json`);
   }
@@ -406,7 +415,10 @@ async function replayCommand(argv: string[], io: Io): Promise<number> {
   } catch (err) {
     return fail((err as Error).message);
   }
-  scenario = { ...scenario, actions: { ...scenario.actions, concurrency: run.config.concurrency } };
+  scenario = withRequests(
+    scenario,
+    run.config.requests ?? Array.from({ length: run.config.concurrency }, (_, i) => i),
+  );
 
   const sql = postgres(databaseUrl, { max: 2, onnotice: () => {} });
   try {
@@ -446,6 +458,162 @@ async function replayCommand(argv: string[], io: Io): Promise<number> {
         : `  Reproduced: ${trial.passed ? "no, it violated this time" : "yes"} ("${again.violation}")\n`,
     );
     return again.passed ? EXIT_OK : EXIT_VIOLATION;
+  } catch (err) {
+    return fail((err as Error).message);
+  } finally {
+    await sql.end();
+  }
+}
+
+async function saveRun(run: RunResult, io: Io): Promise<string> {
+  const dir = join(io.cwd, ".deadheat", "runs");
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, `${run.runId}.json`);
+  await writeFile(file, `${JSON.stringify(run, null, 2)}\n`);
+  return file;
+}
+
+async function shrinkCommand(argv: string[], io: Io): Promise<number> {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        trial: { type: "string" },
+        attempts: { type: "string", default: "5" },
+        proxy: { type: "string" },
+        "base-url": { type: "string" },
+        "database-url": { type: "string" },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    });
+  } catch (err) {
+    io.err(`${(err as Error).message}\n\n${HELP}`);
+    return EXIT_ERROR;
+  }
+  const { values, positionals } = parsed;
+  if (values.help) {
+    io.out(HELP);
+    return EXIT_OK;
+  }
+  const fail = (message: string) => {
+    io.err(`error: ${message}\n`);
+    return EXIT_ERROR;
+  };
+  if (positionals.length > 1) return fail("Expected: deadheat shrink [run-id | file.json]");
+  const attempts = Number(values.attempts);
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts > 1000) {
+    return fail("--attempts must be an integer between 1 and 1000");
+  }
+
+  const loaded = await loadRun(positionals[0], io);
+  if (typeof loaded === "string") return fail(loaded);
+  const { run } = loaded;
+  if (!run.config?.scenarioFile) {
+    return fail(
+      `${run.runId} doesn't record its scenario file (saved before Week 7), so it can't be shrunk`,
+    );
+  }
+  let trial;
+  if (values.trial !== undefined) {
+    const n = Number(values.trial);
+    if (!Number.isInteger(n) || n < 1) return fail("--trial must be an integer >= 1");
+    trial = run.trials.find((t) => t.trial === n);
+    if (!trial) return fail(`${run.runId} has no trial ${n} (it has ${run.trials.length})`);
+    if (trial.passed) return fail(`trial ${n} of ${run.runId} didn't violate; nothing to shrink`);
+  } else {
+    trial = run.trials.find((t) => !t.passed);
+    if (!trial) return fail(`${run.runId} has no violating trial; nothing to shrink`);
+  }
+
+  const policy = run.config.schedule;
+  if (policy === "forced") return fail("this is a replay run; shrink the run it replayed instead");
+  if (policy && !values.proxy)
+    return fail(`the run was scheduled (${policy}), so shrink needs --proxy`);
+  const strategy = strategyFromName(run.strategy);
+  if (!strategy) return fail(`can't recreate strategy "${run.strategy}"`);
+  const databaseUrl = values["database-url"] ?? io.env.DEADHEAT_DATABASE_URL;
+  if (!databaseUrl) return fail("no database: pass --database-url or set DEADHEAT_DATABASE_URL");
+
+  let queryLog: QueryLog | undefined;
+  if (values.proxy) {
+    try {
+      queryLog = await httpQueryLog(values.proxy);
+    } catch (err) {
+      return fail(`cannot reach deadheat proxy at ${values.proxy}: ${(err as Error).message}`);
+    }
+  }
+  let scenario;
+  try {
+    scenario = await loadScenario(resolve(io.cwd, run.config.scenarioFile));
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+
+  const all = run.config.requests ?? Array.from({ length: run.config.concurrency }, (_, i) => i);
+  const seed = run.seed ?? randomInt(2 ** 31);
+  const label = (s: number[]) =>
+    s.length <= 8 ? s.map((i) => `#${i}`).join(" ") : `${s.length} requests`;
+  io.out(
+    `Shrinking ${run.runId} (${run.scenario}): ${all.length} requests, strategy=${run.strategy}${policy ? `, schedule=${policy}` : ""}, up to ${attempts} attempts per candidate\n`,
+  );
+
+  const sql = postgres(databaseUrl, { max: 2, onnotice: () => {} });
+  const results = new Map<string, RunResult>();
+  try {
+    const minimal = await shrinkRequests(
+      all,
+      async (subset) => {
+        const attempt = await runScenario(withRequests(scenario, subset), {
+          strategy,
+          sql,
+          trials: attempts,
+          baseUrl: values["base-url"] ?? run.config.baseUrl,
+          stopOnViolation: true,
+          ...(queryLog ? { queryLog } : {}),
+          ...(policy
+            ? {
+                schedule: {
+                  seed,
+                  policy,
+                  ...(run.config.depth !== undefined ? { depth: run.config.depth } : {}),
+                },
+              }
+            : {}),
+        });
+        if (attempt.aborted) throw new Error(attempt.aborted);
+        results.set(subset.join(","), attempt);
+        return attempt.violations > 0;
+      },
+      ({ tried, violated }) => {
+        const r = results.get(tried.join(","))!;
+        io.out(
+          violated
+            ? `  ${label(tried)}: violates (attempt ${r.trials.length})\n`
+            : `  ${label(tried)}: passes (${attempts} attempts)\n`,
+        );
+      },
+    );
+    if (!minimal) {
+      io.out(
+        `  Couldn't reproduce the violation with all ${all.length} requests in ${attempts} attempts.\n`,
+      );
+      return EXIT_ERROR;
+    }
+
+    const small = results.get(minimal.join(","))!;
+    small.config.scenarioFile = run.config.scenarioFile;
+    small.config.requests = minimal;
+    small.config.shrunkFrom = { runId: run.runId, trial: trial.trial };
+    const bad = small.trials.find((t) => !t.passed)!;
+    io.out(
+      `\nMinimal: ${minimal.length} of ${all.length} requests (${minimal.map((i) => `#${i}`).join(", ")}) still break it: "${bad.violation}"\n`,
+    );
+    io.out(`${formatTrialDetail(bad)}\n`);
+    io.out(`  Saved: ${await saveRun(small, io)}\n`);
+    if (queryLog) io.out(`  Replay it: deadheat replay ${small.runId} --proxy ${values.proxy}\n`);
+    return EXIT_VIOLATION;
   } catch (err) {
     return fail((err as Error).message);
   } finally {

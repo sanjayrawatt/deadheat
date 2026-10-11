@@ -262,4 +262,14 @@ describe("runScenario", () => {
     };
     expect(replayOrder(traced)).toEqual([0, 1, 1, 0]);
   });
+
+  it("stops at the first violating trial when asked", async () => {
+    const state = { trial: 0 };
+    const run = await runScenario(makeScenario([2, 4], state), {
+      strategy: fakeStrategy(state),
+      sql,
+      stopOnViolation: true,
+    });
+    expect(run.trials.map((t) => t.passed)).toEqual([true, false]);
+  });
 });

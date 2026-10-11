@@ -35,6 +35,12 @@ export function formatRun(run: RunResult, options: ReportOptions = {}): string {
     );
   }
 
+  const { requests, shrunkFrom } = run.config ?? {};
+  if (requests && shrunkFrom) {
+    const map = requests.map((orig, j) => `#${j} = #${orig}`).join(", ");
+    lines.push(`  Shrunk from ${shrunkFrom.runId} trial ${shrunkFrom.trial}: ${map} there`);
+  }
+
   const policy = run.config?.schedule;
   if (policy) {
     const how = {

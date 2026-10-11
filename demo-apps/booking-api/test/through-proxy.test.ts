@@ -287,4 +287,47 @@ describe("booking-api through the proxy", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("shrinks a 6-request violation to the 2 requests that race, and the result replays", async () => {
+    const base = await loadScenario(scenarioPath);
+    const scenario = { ...base, actions: { ...base.actions, concurrency: 6 } };
+    const controlUrl = `http://127.0.0.1:${control.port}`;
+    const run = await runScenario(scenario, {
+      strategy: naive,
+      sql,
+      baseUrl,
+      trials: 3,
+      queryLog: await httpQueryLog(controlUrl),
+      schedule: { seed: 9, policy: "barrier", quietMs: 30 },
+    });
+    expect(run.violations).toBeGreaterThan(0);
+    run.config.scenarioFile = scenarioPath;
+    const dir = await mkdtemp(join(tmpdir(), "deadheat-shrink-"));
+    const io = (out: string[]) => ({
+      out: (t: string) => void out.push(t),
+      err: (t: string) => void out.push(t),
+      cwd: dir,
+      env: { DEADHEAT_DATABASE_URL: DIRECT },
+    });
+    try {
+      const file = join(dir, `${run.runId}.json`);
+      await writeFile(file, JSON.stringify(run));
+      const out: string[] = [];
+      const code = await main(["shrink", file, "--proxy", controlUrl, "--attempts", "4"], io(out));
+      const text = out.join("");
+      expect(text).toContain(`Shrinking ${run.runId}`);
+      expect(text).toMatch(
+        /Minimal: 2 of 6 requests \(#\d, #\d\) still break it: "bookings = 2, capacity = 1"/,
+      );
+      expect(code).toBe(1);
+      const shrunkId = /Replay it: deadheat replay (\S+)/.exec(text)![1]!;
+
+      const replayed: string[] = [];
+      const replayCode = await main(["replay", shrunkId, "--proxy", controlUrl], io(replayed));
+      expect(replayed.join("")).toContain("Reproduced: yes");
+      expect(replayCode).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

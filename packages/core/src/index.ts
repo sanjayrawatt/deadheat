@@ -3,6 +3,7 @@ export const VERSION = "0.0.0";
 export * from "./types.js";
 export { runScenario, deriveSeed, replayOrder, DEFAULT_TRIALS, type RunOptions } from "./runner.js";
 export { loadScenario, validateScenario } from "./loader.js";
+export { shrinkRequests, withRequests, type ShrinkStep } from "./shrink.js";
 export {
   formatRun,
   formatTrialDetail,

@@ -159,6 +159,16 @@ describe("lock waits", () => {
   });
 });
 
+describe("shrunk runs", () => {
+  it("maps the requests back to the run they were shrunk from", () => {
+    const text = formatRun({
+      ...base,
+      config: { ...base.config, requests: [4, 13], shrunkFrom: { runId: "run-0", trial: 3 } },
+    });
+    expect(text).toContain("Shrunk from run-0 trial 3: #0 = #4, #1 = #13 there");
+  });
+});
+
 describe("formatTrialDetail", () => {
   it("lists every request of a trial, including a passing one", () => {
     const text = formatTrialDetail(trial(1, true));
