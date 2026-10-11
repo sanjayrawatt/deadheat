@@ -109,3 +109,17 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - The bug from a test, not the code: my first determinism test spun a synchronous loop waiting for a timer that could never fire, which hung vitest with no timeout. Now it awaits.
 - CI actions bumped to their Node 24 majors (checkout v7, setup-node v7, pnpm/action-setup v6), after GitHub's Node 20 deprecation warning.
 - 130 tests.
+
+## Week 9 (Nov 23 – Nov 29, 2026)
+
+### 2026-10-11: PCT, barrier, replay
+
+- Three policies now: `random`, `pct` (Burckhardt et al.: seeded priorities, `depth − 1` change points that demote the request that just ran) and `barrier` (release every waiting batch together, phase by phase).
+- **Barrier closes the gap from Week 6.** The single-statement oversell, which widening and one-at-a-time scheduling can't touch, goes to 99–100% ([BENCHMARKS.md §7](docs/BENCHMARKS.md)). Random and pct get exactly 0% there, which is the honest proof that they serialise statements.
+- **`deadheat replay`** re-runs a saved trial with the proxy forcing the recorded order (`forced` policy). Unscheduled runs replay too: their order comes from the query trace by start time. If the app stops matching the recording (expected request silent for 2s), replay says at which step it went off script.
+- **A determinism bug in Week 8's code, found by looping the e2e test 25 times:** in a run's first, coldest trial one request connected after the 15ms quiet window, so the first decision saw only some requests, and the same seed gave a different order (1 in ~25 runs). The scheduler now waits for every request's first batch, up to 250ms, before the quiet rule applies. 25/25 clean after. The 8 clean reruns in Week 8 weren't enough to see it.
+- My own wrong assumption in a test: barrier's trial 1 isn't one phase, because losers run a second query (`SELECT 1 FROM slots`). The assertion now checks that phase 1 has all five requests.
+- The check-then-act hint picked `SELECT capacity` because it came first. It now names the read made last before the writes, the `COUNT`.
+- PCT sanity check: at N=2 it should hit about 1 in 4 (one change point must land right after the first `COUNT`); measured 19% over 100 trials.
+- **Replay vs the connection pool, found by running it for real:** replaying a barrier trial first serialised the phase (no race), then went off script at step 1. Booking-api's pool has 10 connections for 20 requests, so which requests can send a query at all isn't up to the proxy. Fixes: barrier phases replay together, and once replay leaves the recording it continues with the run's own policy and says it's a re-run. Random and unscheduled runs replay exactly. Barrier runs with more requests than pool connections reproduce only as re-runs (5/5), and the docs say so.
+- 149 tests.

@@ -10,7 +10,8 @@
     "jitter-hit-rate": "tsx jitter-hit-rate.ts",
     "typecheck": "tsc -p tsconfig.json",
     "proxy-overhead": "tsx proxy-overhead.ts",
-    "widen-hit-rate": "tsx widen-hit-rate.ts"
+    "widen-hit-rate": "tsx hit-rate.ts",
+    "schedule-hit-rate": "tsx hit-rate.ts --columns naive,sync,widen,random,pct,barrier --jitters 10"
   },
   "dependencies": {
     "@deadheat/core": "workspace:*",

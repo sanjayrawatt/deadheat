@@ -6,6 +6,7 @@ import {
   RUN_FORMAT_VERSION,
   type QueryLog,
   type RequestSpec,
+  type SchedulePolicy,
   type ScheduleStep,
   type RunResult,
   type Scenario,
@@ -32,7 +33,16 @@ export interface RunOptions {
    * Controlled interleaving (needs `deadheat proxy`): the proxy holds each request's queries
    * and releases one step at a time, choosing with a PRNG seeded from `seed` and the trial.
    */
-  schedule?: { seed: number; quietMs?: number; stepTimeoutMs?: number };
+  schedule?: {
+    seed: number;
+    policy?: SchedulePolicy;
+    depth?: number;
+    /** `forced`: request indexes in release order (replay); arrays are barrier phases. */
+    order?: (number | number[])[];
+    fallback?: "random" | "pct" | "barrier";
+    quietMs?: number;
+    stepTimeoutMs?: number;
+  };
   /** Called after every trial, e.g. to print progress. */
   onTrial?: (result: TrialResult) => void;
 }
@@ -69,7 +79,8 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       concurrency: scenario.actions.concurrency,
       trials: total,
       ...(options.widen ? { widenMs: options.widen.holdMs } : {}),
-      ...(options.schedule ? { schedule: "random" as const } : {}),
+      ...(options.schedule ? { schedule: options.schedule.policy ?? "random" } : {}),
+      ...(options.schedule?.policy === "pct" ? { depth: options.schedule.depth ?? 3 } : {}),
     },
     startedAt: new Date().toISOString(),
     durationMs: 0,
@@ -113,6 +124,10 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
           prefix: `${result.runId}.${trial}.`,
           requests: specs.length,
           seed: trialSeed,
+          ...(schedule.policy ? { policy: schedule.policy } : {}),
+          ...(schedule.depth !== undefined ? { depth: schedule.depth } : {}),
+          ...(schedule.order ? { order: schedule.order } : {}),
+          ...(schedule.fallback ? { fallback: schedule.fallback } : {}),
           ...(schedule.quietMs !== undefined ? { quietMs: schedule.quietMs } : {}),
           ...(schedule.stepTimeoutMs !== undefined
             ? { stepTimeoutMs: schedule.stepTimeoutMs }
@@ -146,7 +161,8 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
         ...(verdict === true ? {} : { violation: verdict }),
         durationMs: performance.now() - trialStart,
         requests,
-        ...(order ? { schedule: order, seed: trialSeed! } : {}),
+        ...(order ? { schedule: order } : {}),
+        ...(order && schedule!.policy !== "forced" ? { seed: trialSeed! } : {}),
       };
       if (!trialResult.passed) result.violations++;
       result.trials.push(trialResult);
@@ -175,4 +191,31 @@ export function deriveSeed(seed: number, trial: number): number {
   let h = Math.imul((seed ^ 0x9e3779b9) >>> 0, 0x85ebca6b) ^ Math.imul(trial, 0xc2b2ae35);
   h = Math.imul(h ^ (h >>> 16), 0x7feb352d);
   return (h ^ (h >>> 15)) >>> 0;
+}
+
+/**
+ * The release order of a saved trial, as request indexes: its recorded schedule, or for an
+ * unscheduled run with a query trace, its queries by start time (one entry per batch).
+ */
+export function replayOrder(trial: TrialResult): (number | number[])[] {
+  const index = (id: string) => Number(id.slice(id.lastIndexOf(".") + 1));
+  if (trial.schedule?.length) {
+    // Barrier phases stay together, or replay would serialise what ran at once.
+    const out: (number | number[])[] = [];
+    trial.schedule.forEach((s, i) => {
+      const prev = trial.schedule![i - 1];
+      if (s.phase === undefined) out.push(index(s.requestId));
+      else if (prev?.phase === s.phase) (out.at(-1) as number[]).push(index(s.requestId));
+      else out.push([index(s.requestId)]);
+    });
+    return out;
+  }
+  const starts = trial.requests.flatMap((r) =>
+    (r.queries ?? []).map((q) => ({ index: r.index, at: q.startedAt, conn: q.connectionId })),
+  );
+  starts.sort((a, b) => a.at - b.at);
+  // Statements of one multi-statement Q share a connection and a start time: one batch.
+  return starts
+    .filter((s, i) => i === 0 || s.at !== starts[i - 1]!.at || s.conn !== starts[i - 1]!.conn)
+    .map((s) => s.index);
 }

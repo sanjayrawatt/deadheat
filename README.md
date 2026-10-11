@@ -82,7 +82,9 @@ Both requests counted 0 bookings before either inserted: check-then-act on a sta
 
 **Make rare races common:** add `--widen 200`. Trial 1 learns which reads each request acts on, and from then on the proxy holds those reads' results for 200ms. Every concurrent request then reads before any of them writes, even when network jitter spreads their arrival out (numbers in [BENCHMARKS.md §6](docs/BENCHMARKS.md)).
 
-**Force the interleaving:** add `--schedule random`. The proxy holds every request's queries and releases them one at a time in a random order chosen by a seed, so the dangerous order isn't left to luck. The report prints the seed and each violating trial's release order, and `--seed <n>` gives the same orders again.
+**Force the interleaving:** add `--schedule random` (or `pct`, or `barrier`). The proxy holds every request's queries and releases them in an order chosen by a seed: one at a time at random, by PCT priorities, or phase by phase all together (for races inside a single statement). The report prints the seed and each violating trial's release order, and `--seed <n>` gives the same orders again.
+
+**Replay a violation:** `deadheat replay <run-id> --proxy http://127.0.0.1:55434` re-runs the first violating trial of a saved run with its queries released in exactly the recorded order, and says whether the violation reproduced.
 
 **Look again later:** every run is saved to `.deadheat/runs/<run-id>.json`. `deadheat show` prints the latest one again, and `deadheat show <run-id> --trial 3` prints trial 3 in full, with every request and all of its SQL in order.
 

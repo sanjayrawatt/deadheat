@@ -34,8 +34,15 @@ export function formatRun(run: RunResult, options: ReportOptions = {}): string {
     );
   }
 
-  if (run.seed !== undefined) {
-    lines.push(`  Scheduled: queries released one at a time in a random order, seed ${run.seed}`);
+  const policy = run.config?.schedule;
+  if (policy) {
+    const how = {
+      random: `queries released one at a time in a random order, seed ${run.seed}`,
+      pct: `PCT (depth ${run.config.depth}): one query at a time by seeded priority, seed ${run.seed}`,
+      barrier: `each phase's queries released together, seed ${run.seed}`,
+      forced: "replay: queries released in the recorded order",
+    }[policy];
+    lines.push(`  Scheduled: ${how}`);
   }
 
   const failed = run.trials.filter((t) => !t.passed);
@@ -81,14 +88,18 @@ function formatTrial(trial: TrialResult, maxRequests: number): string[] {
   lines.push(...formatInterleaving(ordered.slice(0, maxRequests)));
   if (trial.schedule?.length) {
     const steps = trial.schedule.map(
-      (s) => `#${s.requestId.slice(s.requestId.lastIndexOf(".") + 1)}${s.stalled ? "*" : ""}`,
+      (s, i) =>
+        `${s.phase && i && s.phase !== trial.schedule![i - 1]!.phase ? "| " : ""}#${s.requestId.slice(s.requestId.lastIndexOf(".") + 1)}${s.stalled ? "*" : ""}`,
     );
-    const stalled = trial.schedule.some((s) => s.stalled) ? " (* = blocked, others went on)" : "";
+    let stalled = trial.schedule.some((s) => s.stalled) ? " (* = blocked, others went on)" : "";
+    const offScript = trial.schedule.findIndex((s) => s.unforced);
+    if (offScript >= 0) stalled += ` (stopped following the recording at step ${offScript + 1})`;
     const shown =
       steps.length > MAX_STEPS
         ? `${steps.slice(0, MAX_STEPS).join(" ")} … +${steps.length - MAX_STEPS} more`
         : steps.join(" ");
-    lines.push(`    Release order (trial seed ${trial.seed}): ${shown}${stalled}`);
+    const seed = trial.seed === undefined ? "" : ` (trial seed ${trial.seed})`;
+    lines.push(`    Release order${seed}: ${shown}${stalled}`);
   }
   const stale = staleReadPattern(trial);
   if (stale) {

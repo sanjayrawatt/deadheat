@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { EXIT_ERROR, EXIT_OK, formatProxyEvent, main, type Io } from "./cli.js";
+import { EXIT_ERROR, EXIT_OK, formatProxyEvent, main, strategyFromName, type Io } from "./cli.js";
 
 let dir: string;
 
@@ -56,7 +56,18 @@ describe("deadheat CLI arguments", () => {
     [["run", "x.ts", "--widen", "200"], /--widen needs --proxy/],
     [["run", "x.ts", "--widen", "0", "--proxy", "http://x"], /--widen must be/],
     [["run", "x.ts", "--schedule", "random"], /--schedule needs --proxy/],
-    [["run", "x.ts", "--schedule", "pct", "--proxy", "http://x"], /--schedule must be "random"/],
+    [
+      ["run", "x.ts", "--schedule", "magic", "--proxy", "http://x"],
+      /--schedule must be random, pct or barrier/,
+    ],
+    [
+      ["run", "x.ts", "--schedule", "random", "--proxy", "http://x", "--depth", "2"],
+      /--depth only applies/,
+    ],
+    [
+      ["run", "x.ts", "--schedule", "pct", "--proxy", "http://x", "--depth", "0"],
+      /--depth must be/,
+    ],
     [
       ["run", "x.ts", "--schedule", "random", "--proxy", "http://x", "--widen", "100"],
       /either --widen or --schedule/,
@@ -78,6 +89,13 @@ describe("deadheat CLI arguments", () => {
     const t = io();
     expect(await main(argv, t.io)).toBe(EXIT_ERROR);
     expect(t.err()).toMatch(message);
+  });
+
+  it("rebuilds strategies from their recorded names", () => {
+    expect(strategyFromName("naive")?.name).toBe("naive");
+    expect(strategyFromName("sync")?.name).toBe("sync");
+    expect(strategyFromName("sync(settle=50ms)")?.name).toBe("sync(settle=50ms)");
+    expect(strategyFromName("magic")).toBeUndefined();
   });
 
   it("reports an invalid scenario file before touching the database", async () => {
@@ -170,6 +188,18 @@ describe("deadheat show", () => {
     [["show", "--trial", "0"], /--trial must be/],
     [["show", "future.json"], /run format 99, newer than this deadheat/],
   ])("%j fails with a clear message", async (argv, message) => {
+    const t = showIo();
+    expect(await main(argv, t.io)).toBe(EXIT_ERROR);
+    expect(t.err()).toMatch(message);
+  });
+
+  it.each([
+    [["replay", "run-20261010T100000-aaaa"], /replay needs --proxy/],
+    [
+      ["replay", "run-20261010T100000-aaaa", "--proxy", "http://x", "--trial", "1"],
+      /scenario file/,
+    ],
+  ])("replay %j fails with a clear message", async (argv, message) => {
     const t = showIo();
     expect(await main(argv, t.io)).toBe(EXIT_ERROR);
     expect(t.err()).toMatch(message);

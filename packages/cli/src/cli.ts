@@ -8,6 +8,7 @@ import {
   formatRun,
   formatTrialDetail,
   loadScenario,
+  replayOrder,
   runScenario,
   RUN_FORMAT_VERSION,
   strategies,
@@ -15,6 +16,7 @@ import {
   type QueryLog,
   type QueryRecord,
   type RunResult,
+  type SchedulePolicy,
   type ScheduleStep,
   type Strategy,
 } from "@deadheat/core";
@@ -56,6 +58,7 @@ Usage:
   deadheat run <scenario.ts> [options]     attack an API and check the invariant
   deadheat proxy [options]                 sit between an app and Postgres, print every query
   deadheat show [run-id | file.json]       print a saved run again (default: the latest)
+  deadheat replay [run-id | file.json]     re-run one saved trial with its recorded query order
 
 Run options:
   --strategy <name>      ${Object.keys(strategies).join(" | ")} (default: sync)
@@ -69,16 +72,25 @@ Run options:
   --widen <ms>           with --proxy: after trial 1, hold the results of the reads each request
                          acts on (decision reads) for <ms>, so concurrent requests all read
                          before any writes. Makes rare races show up on almost every trial
-  --schedule random      with --proxy: hold every request's queries and release them one at a
-                         time in a seeded random order (controlled interleaving)
+  --schedule <policy>    with --proxy: hold every request's queries and release them under a
+                         seeded policy (controlled interleaving):
+                           random   one query at a time, a random waiting request goes next
+                           pct      one at a time by priority, with --depth change points
+                           barrier  all waiting queries go together, phase by phase
   --seed <n>             seed for --schedule (default: random, printed in the report). The same
                          seed gives the same release order
+  --depth <n>            pct only: bug depth (default 3)
   --no-save              don't write the run to .deadheat/runs/<run-id>.json
   --verbose              list every violating trial in full
 
 Show options:
   --trial <n>            print trial <n> in full: every request and all of its SQL, in order
   --verbose              list every violating trial in full
+
+Replay options:
+  --trial <n>            which trial (default: the first violating one)
+  --proxy <url>          required: the proxy forces the recorded order
+  --base-url, --database-url   as for run (default: the run's baseUrl)
 
 Proxy options:
   --upstream <host:port> the real Postgres (default: host/port of DEADHEAT_DATABASE_URL)
@@ -96,6 +108,7 @@ Exit codes: 0 no violation, 1 invariant violated, 2 error or aborted run.
 export async function main(argv: string[], io: Io = defaultIo): Promise<number> {
   if (argv[0] === "proxy") return proxyCommand(argv.slice(1), io);
   if (argv[0] === "show") return showCommand(argv.slice(1), io);
+  if (argv[0] === "replay") return replayCommand(argv.slice(1), io);
   let parsed;
   try {
     parsed = parseArgs({
@@ -112,6 +125,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         widen: { type: "string" },
         schedule: { type: "string" },
         seed: { type: "string" },
+        depth: { type: "string" },
         save: { type: "boolean", default: true },
         verbose: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -162,8 +176,13 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
   }
 
   let seed: number | undefined;
+  let policy: SchedulePolicy | undefined;
+  let depth: number | undefined;
   if (values.schedule !== undefined) {
-    if (values.schedule !== "random") return fail('--schedule must be "random"');
+    if (!["random", "pct", "barrier"].includes(values.schedule)) {
+      return fail("--schedule must be random, pct or barrier");
+    }
+    policy = values.schedule as SchedulePolicy;
     if (!values.proxy)
       return fail("--schedule needs --proxy (the proxy is what holds the queries)");
     if (widenMs) return fail("use either --widen or --schedule, not both");
@@ -173,6 +192,13 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     }
   } else if (values.seed !== undefined) {
     return fail("--seed only applies to --schedule");
+  }
+  if (values.depth !== undefined) {
+    if (policy !== "pct") return fail("--depth only applies to --schedule pct");
+    depth = Number(values.depth);
+    if (!Number.isInteger(depth) || depth < 1 || depth > 100) {
+      return fail("--depth must be an integer between 1 and 100");
+    }
   }
 
   const databaseUrl = values["database-url"] ?? io.env.DEADHEAT_DATABASE_URL;
@@ -205,7 +231,9 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       ...(values["base-url"] ? { baseUrl: values["base-url"] } : {}),
       ...(queryLog ? { queryLog } : {}),
       ...(widenMs ? { widen: { holdMs: widenMs } } : {}),
-      ...(seed !== undefined ? { schedule: { seed } } : {}),
+      ...(seed !== undefined
+        ? { schedule: { seed, policy: policy!, ...(depth !== undefined ? { depth } : {}) } }
+        : {}),
       onTrial: (t) => io.err(t.passed ? "." : "x"),
     });
     run.config.scenarioFile = relative(io.cwd, resolve(io.cwd, scenarioPath));
@@ -262,30 +290,9 @@ async function showCommand(argv: string[], io: Io): Promise<number> {
     if (!Number.isInteger(trialNo) || trialNo < 1) return fail("--trial must be an integer >= 1");
   }
 
-  const dir = join(io.cwd, ".deadheat", "runs");
-  const [target] = positionals;
-  let file: string;
-  if (!target) {
-    const names = (await readdir(dir).catch(() => [] as string[]))
-      .filter((n) => n.endsWith(".json"))
-      .sort();
-    if (!names.length) return fail(`no saved runs in ${dir}`);
-    file = join(dir, names.at(-1)!);
-  } else {
-    file = target.endsWith(".json") ? resolve(io.cwd, target) : join(dir, `${target}.json`);
-  }
-
-  let run: RunResult;
-  try {
-    run = JSON.parse(await readFile(file, "utf8")) as RunResult;
-  } catch (err) {
-    return fail(`cannot read ${file}: ${(err as Error).message}`);
-  }
-  if ((run.formatVersion ?? 0) > RUN_FORMAT_VERSION) {
-    return fail(
-      `${file} uses run format ${run.formatVersion}, newer than this deadheat (${RUN_FORMAT_VERSION}). Upgrade deadheat.`,
-    );
-  }
+  const loaded = await loadRun(positionals[0], io);
+  if (typeof loaded === "string") return fail(loaded);
+  const { run } = loaded;
 
   if (trialNo === undefined) {
     io.out(`${formatRun(run, values.verbose ? { maxViolations: Infinity } : {})}\n`);
@@ -295,6 +302,160 @@ async function showCommand(argv: string[], io: Io): Promise<number> {
   if (!trial) return fail(`${run.runId} has no trial ${trialNo} (it has ${run.trials.length})`);
   io.out(`${run.scenario}, ${run.runId}, strategy=${run.strategy}\n${formatTrialDetail(trial)}\n`);
   return EXIT_OK;
+}
+
+/** A saved run by id, by path, or (no target) the latest one; an error message on failure. */
+async function loadRun(target: string | undefined, io: Io): Promise<{ run: RunResult } | string> {
+  const dir = join(io.cwd, ".deadheat", "runs");
+  let file: string;
+  if (!target) {
+    const names = (await readdir(dir).catch(() => [] as string[]))
+      .filter((n) => n.endsWith(".json"))
+      .sort();
+    if (!names.length) return `no saved runs in ${dir}`;
+    file = join(dir, names.at(-1)!);
+  } else {
+    file = target.endsWith(".json") ? resolve(io.cwd, target) : join(dir, `${target}.json`);
+  }
+  let run: RunResult;
+  try {
+    run = JSON.parse(await readFile(file, "utf8")) as RunResult;
+  } catch (err) {
+    return `cannot read ${file}: ${(err as Error).message}`;
+  }
+  if ((run.formatVersion ?? 0) > RUN_FORMAT_VERSION) {
+    return `${file} uses run format ${run.formatVersion}, newer than this deadheat (${RUN_FORMAT_VERSION}). Upgrade deadheat.`;
+  }
+  return { run };
+}
+
+async function replayCommand(argv: string[], io: Io): Promise<number> {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        trial: { type: "string" },
+        proxy: { type: "string" },
+        "base-url": { type: "string" },
+        "database-url": { type: "string" },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    });
+  } catch (err) {
+    io.err(`${(err as Error).message}\n\n${HELP}`);
+    return EXIT_ERROR;
+  }
+  const { values, positionals } = parsed;
+  if (values.help) {
+    io.out(HELP);
+    return EXIT_OK;
+  }
+  const fail = (message: string) => {
+    io.err(`error: ${message}\n`);
+    return EXIT_ERROR;
+  };
+  if (positionals.length > 1) return fail("Expected: deadheat replay [run-id | file.json]");
+  if (!values.proxy) return fail("replay needs --proxy (the proxy forces the recorded order)");
+
+  const loaded = await loadRun(positionals[0], io);
+  if (typeof loaded === "string") return fail(loaded);
+  const { run } = loaded;
+  if (!run.config?.scenarioFile) {
+    return fail(
+      `${run.runId} doesn't record its scenario file (saved before Week 7), so it can't be replayed`,
+    );
+  }
+
+  let trial;
+  if (values.trial !== undefined) {
+    const n = Number(values.trial);
+    if (!Number.isInteger(n) || n < 1) return fail("--trial must be an integer >= 1");
+    trial = run.trials.find((t) => t.trial === n);
+    if (!trial) return fail(`${run.runId} has no trial ${n} (it has ${run.trials.length})`);
+  } else {
+    trial = run.trials.find((t) => !t.passed);
+    if (!trial) return fail(`${run.runId} has no violating trial; pick one with --trial <n>`);
+  }
+  const order = replayOrder(trial);
+  if (!order.length) {
+    return fail(
+      `trial ${trial.trial} has no recorded query order (run it with --proxy to record one)`,
+    );
+  }
+
+  const strategy = strategyFromName(run.strategy);
+  if (!strategy) return fail(`can't recreate strategy "${run.strategy}"`);
+  const recorded = run.config.schedule;
+  const fallback = recorded && recorded !== "forced" ? recorded : undefined;
+  const databaseUrl = values["database-url"] ?? io.env.DEADHEAT_DATABASE_URL;
+  if (!databaseUrl) return fail("no database: pass --database-url or set DEADHEAT_DATABASE_URL");
+
+  let queryLog: QueryLog;
+  try {
+    queryLog = await httpQueryLog(values.proxy);
+  } catch (err) {
+    return fail(`cannot reach deadheat proxy at ${values.proxy}: ${(err as Error).message}`);
+  }
+  let scenario;
+  try {
+    scenario = await loadScenario(resolve(io.cwd, run.config.scenarioFile));
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+  scenario = { ...scenario, actions: { ...scenario.actions, concurrency: run.config.concurrency } };
+
+  const sql = postgres(databaseUrl, { max: 2, onnotice: () => {} });
+  try {
+    const replay = await runScenario(scenario, {
+      strategy,
+      sql,
+      trials: 1,
+      baseUrl: values["base-url"] ?? run.config.baseUrl,
+      queryLog,
+      schedule: {
+        seed: trial.seed ?? 0,
+        policy: "forced",
+        order,
+        ...(fallback ? { fallback } : {}),
+        ...(run.config.depth !== undefined ? { depth: run.config.depth } : {}),
+      },
+    });
+    io.out(
+      `Replaying trial ${trial.trial} of ${run.runId} (${run.scenario}, strategy=${run.strategy}): ${order.length} steps in the recorded order\n`,
+    );
+    if (replay.aborted) {
+      io.out(`! ${replay.aborted}\n`);
+      return EXIT_ERROR;
+    }
+    const again = replay.trials[0]!;
+    io.out(`${formatTrialDetail(again)}\n`);
+    const offScript = again.schedule?.findIndex((s) => s.unforced) ?? -1;
+    if (offScript >= 0) {
+      io.out(
+        `  Note: from step ${offScript + 1} the app didn't send the recorded requests' queries in time (often a connection-pool limit), so replay went on with the ${fallback ?? "random"} policy. This is a re-run, not an exact replay.\n`,
+      );
+    }
+    const before = trial.passed ? "the invariant held" : `"${trial.violation}"`;
+    io.out(
+      again.passed
+        ? `  Reproduced: no, the invariant held this time (originally ${before})\n`
+        : `  Reproduced: ${trial.passed ? "no, it violated this time" : "yes"} ("${again.violation}")\n`,
+    );
+    return again.passed ? EXIT_OK : EXIT_VIOLATION;
+  } catch (err) {
+    return fail((err as Error).message);
+  } finally {
+    await sql.end();
+  }
+}
+
+/** Rebuilds a strategy from the name a run recorded, e.g. "sync(settle=50ms)". */
+export function strategyFromName(name: string): Strategy | undefined {
+  const sync = /^sync(?:\(settle=(\d+(?:\.\d+)?)ms\))?$/.exec(name);
+  if (sync) return sync[1] ? createSync({ settleMs: Number(sync[1]) }) : strategies.sync;
+  return strategies[name];
 }
 
 function pickStrategy(name: string, settle: string | undefined): Strategy | string {

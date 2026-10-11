@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
-import { deriveSeed, runScenario } from "./runner.js";
+import { deriveSeed, replayOrder, runScenario } from "./runner.js";
 import type { RequestTrace, Scenario, ScheduleStep, Strategy, TrialSchedule } from "./types.js";
 
 // The fake scenarios below never touch the DB, so an empty object stands in for the client.
@@ -218,5 +218,48 @@ describe("runScenario", () => {
     expect(new Set([1, 2, 3, 4].map((t) => deriveSeed(7, t))).size).toBe(4);
     expect(deriveSeed(7, 1)).not.toBe(deriveSeed(8, 1));
     expect(Number.isInteger(deriveSeed(-5, 3)) && deriveSeed(-5, 3) >= 0).toBe(true);
+  });
+
+  it("replayOrder uses the recorded schedule, else the query trace by start time", () => {
+    const q = (at: number, conn: number) => ({
+      sql: "x",
+      rows: 0,
+      commandTags: [],
+      startedAt: at,
+      durationMs: 1,
+      txStatus: "I" as const,
+      connectionId: conn,
+    });
+    const req = (index: number, queries: ReturnType<typeof q>[]) => ({
+      index,
+      method: "POST",
+      url: "/x",
+      sentAtMs: 0,
+      queries,
+    });
+    const scheduled = {
+      trial: 1,
+      passed: false,
+      durationMs: 1,
+      requests: [],
+      schedule: [{ requestId: "r.1.2" }, { requestId: "r.1.0" }],
+    };
+    expect(replayOrder(scheduled)).toEqual([2, 0]);
+    const barrier = {
+      ...scheduled,
+      schedule: [
+        { requestId: "r.1.1", phase: 1 },
+        { requestId: "r.1.0", phase: 1 },
+        { requestId: "r.1.0", phase: 2 },
+      ],
+    };
+    expect(replayOrder(barrier)).toEqual([[1, 0], [0]]);
+    const traced = {
+      trial: 1,
+      passed: false,
+      durationMs: 1,
+      requests: [req(0, [q(5, 1), q(30, 1)]), req(1, [q(10, 2), q(10, 2), q(20, 2)])],
+    };
+    expect(replayOrder(traced)).toEqual([0, 1, 1, 0]);
   });
 });

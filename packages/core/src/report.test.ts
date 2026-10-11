@@ -93,7 +93,12 @@ describe("scheduled runs", () => {
       { requestId: "run-1.2.0", stalled: true },
       { requestId: "run-1.2.1" },
     ];
-    const text = formatRun({ ...base, seed: 42, trials: [trial(1, true), t] });
+    const text = formatRun({
+      ...base,
+      seed: 42,
+      config: { ...base.config, schedule: "random" },
+      trials: [trial(1, true), t],
+    });
     expect(text).toContain("Scheduled: queries released one at a time in a random order, seed 42");
     expect(text).toContain(
       "Release order (trial seed 123): #1 #0* #1 (* = blocked, others went on)",
@@ -107,6 +112,36 @@ describe("long release orders", () => {
     t.seed = 1;
     t.schedule = Array.from({ length: 35 }, (_, i) => ({ requestId: `run-1.2.${i % 3}` }));
     expect(formatRun({ ...base, seed: 9, trials: [t] })).toMatch(/#2 … \+5 more$/m);
+  });
+
+  it("separates barrier phases and names the policy", () => {
+    const t = trial(2, false);
+    t.seed = 1;
+    t.schedule = [
+      { requestId: "run-1.2.0", phase: 1 },
+      { requestId: "run-1.2.1", phase: 1 },
+      { requestId: "run-1.2.1", phase: 2 },
+    ];
+    const text = formatRun({
+      ...base,
+      seed: 5,
+      config: { ...base.config, schedule: "barrier" },
+      trials: [t],
+    });
+    expect(text).toContain("Scheduled: each phase's queries released together, seed 5");
+    expect(text).toContain("Release order (trial seed 1): #0 #1 | #1");
+  });
+
+  it("says where a replay stopped following the recording", () => {
+    const t = trial(1, false);
+    t.schedule = [{ requestId: "run-1.1.0" }, { requestId: "run-1.1.1", unforced: true }];
+    const text = formatRun({
+      ...base,
+      config: { ...base.config, schedule: "forced" },
+      trials: [t],
+    });
+    expect(text).toContain("Scheduled: replay: queries released in the recorded order");
+    expect(text).toContain("Release order: #0 #1 (stopped following the recording at step 2)");
   });
 });
 

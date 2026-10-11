@@ -1,11 +1,13 @@
-// Hit rate with race-window widening: burst-only vs burst + the proxy holding decision reads.
+// Hit rate of each way of attacking: burst-only, widening, and the proxy's schedulers.
 //
 //   client ──(jitter proxy: latency ± jitter)──► booking-api ──► deadheat proxy ──► Postgres
 //
 // The jitter proxy runs in this process rather than Toxiproxy in Docker: see jitter-proxy.ts.
 // Needs: docker compose up -d (Postgres) and `corepack pnpm build`.
 // Usage: corepack pnpm widen-hit-rate [--trials 100] [--concurrency 2,20] [--jitters 0,10]
-//                                     [--hold 200] [--variant naive]
+//                                     [--hold 200] [--variant naive] [--seed 1]
+//                                     [--columns naive,sync,widen,random,pct,barrier]
+//        corepack pnpm schedule-hit-rate   (all columns, 10ms jitter)
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -22,6 +24,8 @@ const { values } = parseArgs({
     latency: { type: "string", default: "10" },
     hold: { type: "string", default: "200" },
     variant: { type: "string", default: "naive" },
+    columns: { type: "string", default: "naive,sync,widen" },
+    seed: { type: "string", default: "1" },
   },
 });
 const trials = Number(values.trials);
@@ -83,14 +87,35 @@ try {
     fileURLToPath(new URL("../scenarios/booking-oversell.ts", import.meta.url)),
   );
   const sync50 = createSync({ settleMs: 50 });
-  const columns = [
-    { name: "naive", run: { strategy: naive } },
-    { name: "sync", run: { strategy: sync50 } },
-    { name: `sync+widen ${holdMs}ms`, run: { strategy: sync50, widen: { holdMs } } },
+  const seed = Number(values.seed);
+  const all = [
+    { key: "naive", name: "naive", run: { strategy: naive } },
+    { key: "sync", name: "sync", run: { strategy: sync50 } },
+    { key: "widen", name: `sync+widen ${holdMs}ms`, run: { strategy: sync50, widen: { holdMs } } },
+    {
+      key: "random",
+      name: "sync+random",
+      run: { strategy: sync50, schedule: { seed, policy: "random" as const } },
+    },
+    {
+      key: "pct",
+      name: "sync+pct(3)",
+      run: { strategy: sync50, schedule: { seed, policy: "pct" as const } },
+    },
+    {
+      key: "barrier",
+      name: "sync+barrier",
+      run: { strategy: sync50, schedule: { seed, policy: "barrier" as const } },
+    },
   ];
+  const columns = values.columns.split(",").map((key) => {
+    const column = all.find((c) => c.key === key);
+    if (!column) throw new Error(`unknown column "${key}"; use ${all.map((c) => c.key).join(",")}`);
+    return column;
+  });
 
   console.log(
-    `widening: variant=${values.variant}, ${trials} trials per cell, client→API latency ${values.latency}ms ± jitter (in-process jitter proxy), sync settle 50ms\n`,
+    `hit rate: variant=${values.variant}, ${trials} trials per cell, client→API latency ${values.latency}ms ± jitter (in-process jitter proxy), sync settle 50ms\n`,
   );
   console.log(`N   jitter   ${columns.map((c) => c.name.padStart(20)).join("")}`);
   for (const n of values.concurrency.split(",").map(Number)) {

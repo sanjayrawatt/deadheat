@@ -68,13 +68,30 @@ export interface QueryLog {
   stopSchedule?(): Promise<ScheduleStep[]>;
 }
 
+export type SchedulePolicy = "random" | "pct" | "barrier" | "forced";
+
 export interface TrialSchedule {
   /** Request ids starting with this belong to the trial: `<runId>.<trial>.`. */
   prefix: string;
   requests: number;
   seed: number;
+  /** Default `random`. */
+  policy?: SchedulePolicy;
+  /** PCT bug depth: how many priority change points (+1). Default 3. */
+  depth?: number;
+  /**
+   * `forced`: request indexes in the order their batches must be released (replay). An array
+   * entry is a barrier phase: those requests' batches are released together.
+   */
+  order?: (number | number[])[];
   quietMs?: number;
+  /** At the start, wait this long for every request's first batch before deciding anyway. */
+  startTimeoutMs?: number;
   stepTimeoutMs?: number;
+  /** `forced`: give up forcing when the expected request sends nothing for this long. */
+  forceTimeoutMs?: number;
+  /** `forced`: the policy that takes over once the recording is used up or abandoned. */
+  fallback?: "random" | "pct" | "barrier";
 }
 
 /** One query batch the proxy released, in release order. */
@@ -82,6 +99,10 @@ export interface ScheduleStep {
   requestId: string;
   /** It didn't finish within the step timeout (probably waiting on a lock), so others went on. */
   stalled?: boolean;
+  /** `barrier`: steps with the same phase were released together. */
+  phase?: number;
+  /** `forced`: released after replay stopped following the recorded order. */
+  unforced?: boolean;
 }
 
 /** Reads whose results the proxy delays, to widen race windows. */
@@ -135,8 +156,10 @@ export interface RunConfig {
   concurrency: number;
   trials: number;
   widenMs?: number;
-  /** Controlled interleaving: the proxy released queries one step at a time. */
-  schedule?: "random";
+  /** Controlled interleaving: how the proxy released the queries. */
+  schedule?: SchedulePolicy;
+  /** PCT depth, when `schedule` is `pct`. */
+  depth?: number;
 }
 
 export interface RunResult {

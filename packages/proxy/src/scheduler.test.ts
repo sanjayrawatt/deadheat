@@ -57,8 +57,19 @@ describe("Scheduler", () => {
     expect(orders.size).toBeGreaterThan(1);
   });
 
+  it("at the start, waits for every request's first batch up to startTimeoutMs", async () => {
+    const { s, released, offer } = harness({ quietMs: 5, startTimeoutMs: 60 });
+    offer("r.1.0");
+    await sleep(30);
+    expect(released).toEqual([]); // quiet for 30ms, but r.1.1 and r.1.2 haven't shown up yet
+    offer("r.1.1");
+    offer("r.1.2");
+    expect(released).toHaveLength(1);
+    s.stop();
+  });
+
   it("decides anyway after quietMs when some requests never send a query", async () => {
-    const { s, released, offer } = harness({ quietMs: 20 });
+    const { s, released, offer } = harness({ quietMs: 20, startTimeoutMs: 0 });
     offer("r.1.0");
     await sleep(5);
     expect(released).toEqual([]);
@@ -86,6 +97,107 @@ describe("Scheduler", () => {
     expect(released.sort()).toEqual(["r.1.0", "r.1.1"]);
     offer("r.1.2");
     expect(released).toContain("r.1.2");
+  });
+
+  it("barrier: releases every waiting batch together, then waits for the whole phase", () => {
+    const { s, released, offer } = harness({ policy: "barrier" });
+    offer("r.1.0");
+    offer("r.1.1");
+    expect(released).toEqual([]);
+    offer("r.1.2");
+    expect(released.sort()).toEqual(["r.1.0", "r.1.1", "r.1.2"]);
+    expect(s.order.every((st) => st.phase === 1)).toBe(true);
+    s.finished("r.1.0");
+    offer("r.1.0");
+    expect(released).toHaveLength(3); // phase 1 isn't over yet
+    s.finished("r.1.1");
+    s.finished("r.1.2");
+    offer("r.1.1");
+    offer("r.1.2");
+    expect(released).toHaveLength(6);
+    expect(s.order.slice(3).every((st) => st.phase === 2)).toBe(true);
+    s.stop();
+  });
+
+  it("pct: runs the highest-priority request until a change point demotes it", () => {
+    const { s, released, offer } = harness({ policy: "pct", depth: 1 });
+    for (const id of ["r.1.0", "r.1.1", "r.1.2"]) offer(id);
+    const first = released[0]!;
+    // depth 1 has no change points: the top request keeps winning whenever it waits
+    for (let i = 0; i < 3; i++) {
+      s.finished(first);
+      offer(first);
+    }
+    expect(released).toEqual([first, first, first, first]);
+    s.stop();
+  });
+
+  it("pct: the same seed gives the same priorities", () => {
+    const pick = (seed: number) => {
+      const { s, released, offer } = harness({ policy: "pct", seed });
+      for (const id of ["r.1.0", "r.1.1", "r.1.2"]) offer(id);
+      s.stop();
+      return released[0];
+    };
+    expect(pick(3)).toBe(pick(3));
+    expect(new Set([1, 2, 3, 4, 5, 6, 7, 8].map(pick)).size).toBeGreaterThan(1);
+  });
+
+  it("forced: follows the recorded order, whatever arrives first", () => {
+    const { s, released, offer } = harness({ policy: "forced", order: [2, 0, 2] });
+    offer("r.1.0");
+    offer("r.1.1");
+    expect(released).toEqual([]);
+    offer("r.1.2");
+    expect(released).toEqual(["r.1.2"]);
+    s.finished("r.1.2");
+    expect(released).toEqual(["r.1.2", "r.1.0"]);
+    s.finished("r.1.0");
+    offer("r.1.2");
+    expect(released).toEqual(["r.1.2", "r.1.0", "r.1.2"]);
+    expect(s.order.some((st) => st.unforced)).toBe(false);
+    s.stop();
+  });
+
+  it("forced: replays a barrier phase together once all its requests wait", () => {
+    const { s, released, offer } = harness({ policy: "forced", order: [[0, 2], 1] });
+    offer("r.1.0");
+    offer("r.1.1");
+    expect(released).toEqual([]);
+    offer("r.1.2");
+    expect(released).toEqual(["r.1.0", "r.1.2"]);
+    expect(s.order.map((st) => st.phase)).toEqual([1, 1]);
+    s.finished("r.1.0");
+    expect(released).toHaveLength(2); // the phase isn't over until r.1.2 is done too
+    s.finished("r.1.2");
+    expect(released).toEqual(["r.1.0", "r.1.2", "r.1.1"]);
+    s.stop();
+  });
+
+  it("forced: continues with the fallback policy after the recording", () => {
+    const { s, released, offer } = harness({ policy: "forced", order: [1], fallback: "barrier" });
+    for (const id of ["r.1.0", "r.1.1", "r.1.2"]) offer(id);
+    expect(released).toEqual(["r.1.1"]);
+    s.finished("r.1.1");
+    offer("r.1.1");
+    expect(released.slice(1).sort()).toEqual(["r.1.0", "r.1.1", "r.1.2"]); // one barrier phase
+    expect(s.order.slice(1).every((st) => st.unforced && st.phase === 1)).toBe(true);
+    s.stop();
+  });
+
+  it("forced: gives up when the expected request never comes, and marks the rest", async () => {
+    const { s, released, offer } = harness({
+      policy: "forced",
+      order: [1, 0],
+      forceTimeoutMs: 20,
+      quietMs: 5,
+      startTimeoutMs: 0,
+    });
+    offer("r.1.0");
+    await sleep(50);
+    expect(released).toEqual(["r.1.0"]);
+    expect(s.order[0]).toMatchObject({ requestId: "r.1.0", unforced: true });
+    s.stop();
   });
 
   it("mulberry32 is deterministic and in [0, 1)", () => {

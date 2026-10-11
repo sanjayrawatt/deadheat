@@ -170,3 +170,34 @@ What this shows:
 3. More concurrent requests raise burst-only hit rates (more chances for two to land together), but only widening reaches 100%.
 
 **Why this doesn't use Toxiproxy (unlike §3):** the first run aborted at N=20. A `sync` trial's 20 fresh connections to Toxiproxy's published port sometimes never reached the container. The client saw them as connected, the app saw nothing, and Toxiproxy logged no accept, so the trial hung for 30s. It happened with and without `deadheat proxy` in the path, never without Toxiproxy, and a 200ms pause between trials didn't help (Docker Desktop 4.57, macOS). `naive` reuses keep-alive connections and wasn't affected. The benchmark now uses `benchmarks/jitter-proxy.ts`, a host-side proxy with the same latency ± jitter on client→API (order kept); 900 N=20 trials ran without a hang. Because the jitter source differs, these numbers aren't directly comparable with §3. Wallet widening isn't measured yet.
+
+## 7. Scheduling policies (2026-10-11)
+
+Same harness as §6: booking API through `deadheat proxy`, host-side jitter proxy at 10ms ± 10ms on client→API, 100 trials per cell. Every scheduled column uses `sync` (settle 50ms) to fire, and seed 1 (trial seeds derived from it).
+
+```bash
+docker compose up -d --wait && corepack pnpm build
+cd benchmarks && corepack pnpm schedule-hit-rate                            # naive variant
+cd benchmarks && corepack pnpm schedule-hit-rate --variant single-statement
+```
+
+`naive` variant (separate check and insert):
+
+| N   | naive | sync | widen 200ms | random | pct (depth 3) | **barrier** |
+| --- | ----- | ---- | ----------- | ------ | ------------- | ----------- |
+| 2   | 29%   | 32%  | 99%         | 33%    | 19%           | **100%**    |
+| 20  | 79%   | 96%  | 100%        | 100%   | 100%          | **100%**    |
+
+`single-statement` variant (`INSERT … SELECT … WHERE count < capacity`):
+
+| N   | naive | sync | widen 200ms | random | pct (depth 3) | **barrier** |
+| --- | ----- | ---- | ----------- | ------ | ------------- | ----------- |
+| 2   | 20%   | 24%  | 21%         | 0%     | 0%            | **99%**     |
+| 20  | 72%   | 84%  | 90%         | 0%     | 0%            | **100%**    |
+
+What this shows:
+
+1. **Barrier is the only policy that wins on both variants.** Releasing each phase together makes every request read before any of them writes, whether the read is a separate query (naive) or a sub-select inside the write (single-statement). Even with 2 requests and 10ms jitter it hits 99–100%.
+2. **One-at-a-time policies (random, pct) can't break a single statement: 0%, as designed.** Each statement runs alone, so the sub-select always sees the previous insert. They aren't useless: they explore _orders_. Barrier only produces "everyone reads, then everyone writes", while random and pct also reach orders like "A reads, B reads and writes, A writes", which matter for multi-step bugs (lost updates, partial transfers).
+3. **With 2 requests, random (33%) and pct (19%) are close to burst-only.** For N=2, the race needs one specific order of 6 steps. PCT finds it only when a change point lands right after the first request's `COUNT`, about 1 in 4 by the numbers, and 19% measured. With 20 requests almost any order has two requests counting before an insert, so every scheduler reaches 100%.
+4. Widening stays strong for check-then-act (99–100%) but, like random and pct, can't help the single statement (21%, 90%: no better than sync).

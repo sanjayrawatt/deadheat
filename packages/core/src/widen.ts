@@ -68,11 +68,13 @@ export function staleReadPattern(trial: TrialResult): string | undefined {
       byRead.set(f, list);
     }
   }
+  // Of several stale reads, the one read last before the writes is the check being acted on.
+  let best: { f: string; lastRead: number } | undefined;
   for (const [f, list] of byRead) {
     if (list.length < 2) continue;
     const lastRead = Math.max(...list.map((x) => x.readAt));
     const firstWrite = Math.min(...list.map((x) => x.firstWriteAt));
-    if (lastRead < firstWrite) return f;
+    if (lastRead < firstWrite && (!best || lastRead > best.lastRead)) best = { f, lastRead };
   }
-  return undefined;
+  return best?.f;
 }

@@ -1,9 +1,12 @@
 // The booking API talks to Postgres *through* Deadheat's proxy: the app must behave exactly as
 // before (v1 requirement: the proxy is transparent), and the oversell must still be found.
 // The scenario's own setup/invariant queries go straight to Postgres, so they aren't observed.
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { formatRun, loadScenario, naive, runScenario } from "@deadheat/core";
-import { httpQueryLog } from "deadheat/cli";
+import { httpQueryLog, main } from "deadheat/cli";
 import {
   QueryStore,
   startControl,
@@ -206,5 +209,82 @@ describe("booking-api through the proxy", () => {
     expect(shape(again)).toEqual(shape(first));
     expect(again.violations).toBe(first.violations);
     expect(formatRun(first)).toContain("seed 2026");
+  });
+
+  it("barrier: releases each phase together and finds the single-statement oversell", async () => {
+    const single = buildAppFn("single-statement");
+    const singleUrl = await single.listen({ port: 0, host: "127.0.0.1" });
+    try {
+      const base = await loadScenario(scenarioPath);
+      const scenario = { ...base, actions: { ...base.actions, concurrency: 5 } };
+      const queryLog = await httpQueryLog(`http://127.0.0.1:${control.port}`);
+      const run = await runScenario(scenario, {
+        strategy: naive,
+        sql,
+        baseUrl: singleUrl,
+        trials: 10,
+        queryLog,
+        schedule: { seed: 1, policy: "barrier", quietMs: 50 },
+      });
+      expect(run.config.schedule).toBe("barrier");
+      // Phase 1 is every request's INSERT … SELECT, released together; losers then check the slot.
+      const phase1 = run.trials[0]!.schedule!.filter((s) => s.phase === 1);
+      expect(phase1.map((s) => s.requestId.split(".").at(-1)).sort()).toEqual([
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+      ]);
+      expect(run.violations).toBeGreaterThan(0);
+    } finally {
+      await single.close();
+    }
+  });
+
+  it("replays a violating trial in its recorded order and reproduces the violation", async () => {
+    const base = await loadScenario(scenarioPath);
+    const scenario = { ...base, actions: { ...base.actions, concurrency: 3 } };
+    const queryLog = await httpQueryLog(`http://127.0.0.1:${control.port}`);
+    const run = await runScenario(scenario, {
+      strategy: naive,
+      sql,
+      baseUrl,
+      trials: 10,
+      queryLog,
+      schedule: { seed: 2026, quietMs: 20 },
+    });
+    const bad = run.trials.find((t) => !t.passed)!;
+    run.config.scenarioFile = scenarioPath;
+    const dir = await mkdtemp(join(tmpdir(), "deadheat-replay-"));
+    try {
+      const file = join(dir, `${run.runId}.json`);
+      await writeFile(file, JSON.stringify(run));
+      const out: string[] = [];
+      const code = await main(
+        [
+          "replay",
+          file,
+          "--trial",
+          String(bad.trial),
+          "--proxy",
+          `http://127.0.0.1:${control.port}`,
+        ],
+        {
+          out: (t) => void out.push(t),
+          err: (t) => void out.push(t),
+          cwd: dir,
+          env: { DEADHEAT_DATABASE_URL: DIRECT },
+        },
+      );
+      const text = out.join("");
+      expect(text).toContain(`Replaying trial ${bad.trial} of ${run.runId}`);
+      expect(text).toContain("Reproduced: yes");
+      expect(code).toBe(1);
+      const shape = (ids: string[]) => ids.map((id) => id.split(".").at(-1)).join(" #");
+      expect(text).toContain(`Release order: #${shape(bad.schedule!.map((s) => s.requestId))}`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

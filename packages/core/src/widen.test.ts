@@ -83,6 +83,16 @@ describe("staleReadPattern", () => {
     expect(staleReadPattern(trial)).toBe(COUNT);
   });
 
+  it("names the read made last before the writes when several are stale", () => {
+    const trial = {
+      requests: [
+        req(201, [q(CAP, 1), q(COUNT, 3), q(INSERT, 6)]),
+        req(201, [q(CAP, 2), q(COUNT, 4), q(INSERT, 7)]),
+      ],
+    } as TrialResult;
+    expect(staleReadPattern(trial)).toBe(COUNT);
+  });
+
   it("stays quiet when the second read came after the first write (serialised)", () => {
     const trial = {
       requests: [req(201, [q(COUNT, 1), q(INSERT, 2)]), req(201, [q(COUNT, 3), q(INSERT, 4)])],

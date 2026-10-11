@@ -72,8 +72,8 @@ export interface ControlServer {
  *   POST /take  { requestIds: [...] }  → { queries: { [requestId]: QueryEvent[] } }
  *   PUT  /holds { holdMs, fingerprints } → hold matching reads' results (widening)
  *   DELETE /holds                      → stop holding
- *   PUT  /schedule { prefix, requests, seed, quietMs?, stepTimeoutMs? }
- *                                      → release that trial's queries one step at a time
+ *   PUT  /schedule { prefix, requests, seed, policy?, depth?, order?, …timeouts }
+ *                                      → control when that trial's queries are released
  *   DELETE /schedule                   → stop; { order: ScheduleStep[] }
  */
 export async function startControl(options: {
@@ -115,11 +115,22 @@ export async function startControl(options: {
             body.requests! > 0 &&
             Number.isInteger(body.seed) &&
             ms(body.quietMs) &&
-            ms(body.stepTimeoutMs);
+            ms(body.stepTimeoutMs) &&
+            ms(body.forceTimeoutMs) &&
+            ms(body.startTimeoutMs) &&
+            (body.policy === undefined ||
+              ["random", "pct", "barrier", "forced"].includes(body.policy)) &&
+            (body.fallback === undefined || ["random", "pct", "barrier"].includes(body.fallback)) &&
+            (body.depth === undefined || (Number.isInteger(body.depth) && body.depth >= 1)) &&
+            (body.order === undefined ||
+              (Array.isArray(body.order) &&
+                body.order.every((e) =>
+                  (Array.isArray(e) ? e : [e]).every((i) => Number.isInteger(i) && i >= 0),
+                )));
           if (!ok) {
             return send(400, {
               error:
-                "expected { prefix: string, requests: int > 0, seed: int, quietMs?, stepTimeoutMs? (0-60000) }",
+                "expected { prefix: string, requests: int > 0, seed: int, policy?: random|pct|barrier|forced, depth?: int >= 1, order?: (int | int[])[], quietMs?, stepTimeoutMs?, forceTimeoutMs? (0-60000) }",
             });
           }
           options.schedule.setSchedule(body as ScheduleConfig);
