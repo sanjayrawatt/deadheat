@@ -201,3 +201,21 @@ What this shows:
 2. **One-at-a-time policies (random, pct) can't break a single statement: 0%, as designed.** Each statement runs alone, so the sub-select always sees the previous insert. They aren't useless: they explore _orders_. Barrier only produces "everyone reads, then everyone writes", while random and pct also reach orders like "A reads, B reads and writes, A writes", which matter for multi-step bugs (lost updates, partial transfers).
 3. **With 2 requests, random (33%) and pct (19%) are close to burst-only.** For N=2, the race needs one specific order of 6 steps. PCT finds it only when a change point lands right after the first request's `COUNT`, about 1 in 4 by the numbers, and 19% measured. With 20 requests almost any order has two requests counting before an insert, so every scheduler reaches 100%.
 4. Widening stays strong for check-then-act (99–100%) but, like random and pct, can't help the single statement (21%, 90%: no better than sync).
+
+## 8. Lock-wait detection (2026-10-11)
+
+Wallet API (`naive` variant, transfers in transactions), scenario `wallet-overdraft` (N=10, all transfers credit account 3, so they queue on its row lock), through `deadheat proxy`, 10 trials, seed 5. The only difference between the columns is whether the proxy has a monitor connection for `pg_blocking_pids`.
+
+```bash
+node packages/cli/dist/bin.js proxy --quiet --monitor-url $DEADHEAT_DATABASE_URL      # or a dead URL for "timeout only"
+cd demo-apps/wallet-api && DATABASE_URL=postgres://deadheat:deadheat@127.0.0.1:55433/deadheat WALLET_VARIANT=naive corepack pnpm start
+node packages/cli/dist/bin.js run scenarios/wallet-overdraft.ts --trials 10 --proxy http://127.0.0.1:55434 --schedule random --seed 5
+```
+
+| Policy  | Violations | Timeout only (100ms per lock wait) | With lock probe |
+| ------- | ---------- | ---------------------------------- | --------------- |
+| random  | 10/10      | 17.9s                              | **6.6s**        |
+| pct     | 5/10       | 8.3s                               | 7.6s            |
+| barrier | 10/10      | 12.4s                              | **3.7s**        |
+
+The same seed found the same number of violations either way: the probe changes when the next step is released, never which one. It makes lock-heavy runs 2.7–3.4× faster, and every blocked step in the trace now names the request holding the lock. PCT gains less because it mostly runs one request at a time, so it rarely releases a query into a lock held by another request.

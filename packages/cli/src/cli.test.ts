@@ -270,5 +270,41 @@ describe("deadheat proxy", () => {
     expect(await done).toBe(EXIT_OK);
     expect(t.out()).toMatch(/connected {2}user=deadheat db=deadheat/);
     expect(t.out()).toMatch(/\[I\] SELECT 40 \+ 2 AS answer → SELECT 1 \(1 row\)/);
+    expect(t.err()).toContain("lock waits: found by timeout only");
+  });
+
+  it.each([
+    [
+      process.env.DATABASE_URL ?? "postgres://deadheat:deadheat@localhost:55432/deadheat",
+      /lock waits: checked with pg_blocking_pids via /,
+    ],
+    [
+      "postgres://nobody@127.0.0.1:1/none",
+      /lock waits: monitor connection failed .*found by timeout only/,
+    ],
+  ])("reports how lock waits are found (monitor %s)", async (monitorUrl, message) => {
+    const controller = new AbortController();
+    const t = io();
+    t.io.signal = controller.signal;
+    const done = main(
+      [
+        "proxy",
+        "--upstream",
+        "127.0.0.1:55432",
+        "--port",
+        "0",
+        "--control-port",
+        "0",
+        "--monitor-url",
+        monitorUrl,
+      ],
+      t.io,
+    );
+    for (let i = 0; i < 300 && !/lock waits/.test(t.err()); i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    controller.abort();
+    expect(await done).toBe(EXIT_OK);
+    expect(t.err()).toMatch(message);
   });
 });

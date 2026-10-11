@@ -27,6 +27,13 @@ export interface ProxyOptions {
   port?: number;
   host?: string;
   onEvent?: (event: ProxyEvent) => void;
+  /** A direct database connection for lock checks while scheduling (see LockMonitor). */
+  monitor?: LockMonitor;
+}
+
+/** Answers which backends wait on a lock: backend pid → pids holding it (empty if none). */
+export interface LockMonitor {
+  blockers(pids: number[]): Promise<Map<number, number[]>>;
 }
 
 export type { HoldRules, ScheduleConfig, ScheduleStep };
@@ -55,6 +62,28 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
   let nextId = 1;
   let holds: { rules: HoldRules; set: Set<string> } | null = null;
   let scheduler: Scheduler | null = null;
+  // Which backend ran each scheduled request's latest batch, and the other way round, so the
+  // lock monitor's pids can be named as requests.
+  const requestPid = new Map<string, number>();
+  const pidOwner = new Map<number, string>();
+  const monitor = options.monitor;
+  const probe = monitor
+    ? async (ids: string[]) => {
+        const blocked = new Map<string, string[]>();
+        const pids = ids.flatMap((id) => requestPid.get(id) ?? []);
+        if (!pids.length) return blocked;
+        const answer = await monitor.blockers(pids);
+        for (const id of ids) {
+          const by = answer.get(requestPid.get(id)!);
+          if (by?.length)
+            blocked.set(
+              id,
+              by.map((pid) => pidOwner.get(pid) ?? `pid ${pid}`),
+            );
+        }
+        return blocked;
+      }
+    : undefined;
 
   // Only queries tagged by the agent are held, so other traffic through the proxy isn't slowed.
   const holdFor = (sql: string, requestId: string | undefined): number =>
@@ -71,6 +100,7 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
     const fromServer = new FrameDecoder(false);
     const tracker = new QueryTracker(connectionId, emit);
     let closed = false;
+    let backendPid: number | undefined;
 
     // Server→client frames go through this queue. A hold pauses it; frames that arrive in the
     // meantime wait behind the held ones, so order is always kept.
@@ -110,6 +140,10 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
     const pump = () => {
       while (inbox[0]?.ready && !closed) {
         const segment = inbox.shift()!;
+        if (segment.owner && backendPid !== undefined) {
+          requestPid.set(segment.owner.requestId, backendPid);
+          pidOwner.set(backendPid, segment.owner.requestId);
+        }
         for (const frame of segment.frames) {
           tracker.frontend(frame);
           upstream.write(frame.raw);
@@ -198,6 +232,7 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
       for (const frame of frames) {
         const holdMs = tracker.responding()?.decide(holdFor) ?? 0;
         if (holdMs > 0) pausedUntil = Math.max(pausedUntil, performance.now() + holdMs);
+        if (frame.type === "K") backendPid = frame.payload.readInt32BE(0);
         tracker.backend(frame);
         toClient(frame.raw);
         if (frame.type === "Z") {
@@ -229,7 +264,9 @@ export async function startProxy(options: ProxyOptions): Promise<RunningProxy> {
     },
     setSchedule(config) {
       const order = scheduler?.stop() ?? [];
-      scheduler = config ? new Scheduler(config) : null;
+      requestPid.clear();
+      pidOwner.clear();
+      scheduler = config ? new Scheduler(config, probe ? { probe } : {}) : null;
       return order;
     },
     get schedule() {

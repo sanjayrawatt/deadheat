@@ -96,6 +96,8 @@ Proxy options:
   --upstream <host:port> the real Postgres (default: host/port of DEADHEAT_DATABASE_URL)
   --port <n>             port to listen on (default: ${DEFAULT_PROXY_PORT}); point the app's DATABASE_URL here
   --control-port <n>     where \`deadheat run --proxy\` collects queries (default: ${DEFAULT_CONTROL_PORT})
+  --monitor-url <url>    a direct database URL for spotting queries that wait on a lock while
+                         scheduling (default: DEADHEAT_DATABASE_URL)
   -q, --quiet            don't print each query
 
   -h, --help             show this help
@@ -480,6 +482,7 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
         upstream: { type: "string" },
         port: { type: "string", default: String(DEFAULT_PROXY_PORT) },
         "control-port": { type: "string", default: String(DEFAULT_CONTROL_PORT) },
+        "monitor-url": { type: "string" },
         quiet: { type: "boolean", short: "q", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
@@ -513,6 +516,26 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
     if (!Number.isInteger(n) || n < 0 || n > 65535) return fail(`${flag} must be 0-65535`);
   }
 
+  // Without a direct connection for lock checks, a scheduled step blocked on a row lock is
+  // only noticed by the step timeout. Check it once, so a bad URL doesn't cost 2s per block.
+  const monitorUrl = values["monitor-url"] ?? io.env.DEADHEAT_DATABASE_URL;
+  let monitorSql: postgres.Sql | undefined;
+  let lockNote =
+    "lock waits: found by timeout only (pass --monitor-url or set DEADHEAT_DATABASE_URL)";
+  if (monitorUrl) {
+    monitorSql = postgres(monitorUrl, { max: 1, onnotice: () => {}, connect_timeout: 5 });
+    try {
+      await monitorSql`SELECT 1`;
+      const u = new URL(monitorUrl);
+      lockNote = `lock waits: checked with pg_blocking_pids via ${u.hostname}:${u.port || 5432}`;
+    } catch (err) {
+      lockNote = `lock waits: monitor connection failed (${(err as Error).message}), found by timeout only`;
+      await monitorSql.end({ timeout: 1 });
+      monitorSql = undefined;
+    }
+  }
+  const sqlMonitor = monitorSql;
+
   const store = new QueryStore();
   let proxy;
   let control;
@@ -520,6 +543,17 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
     proxy = await startProxy({
       upstream: { host: match[1]!, port: Number(match[2]) },
       port,
+      ...(sqlMonitor
+        ? {
+            monitor: {
+              blockers: async (pids: number[]) => {
+                const rows = await sqlMonitor<{ pid: number; by: number[] }[]>`
+                  SELECT pid, pg_blocking_pids(pid) AS by FROM unnest(${pids}::int[]) AS pid`;
+                return new Map(rows.map((r) => [r.pid, r.by]));
+              },
+            },
+          }
+        : {}),
       onEvent: (e) => {
         if (e.type === "query") store.add(e);
         if (!values.quiet) io.out(`${formatProxyEvent(e)}\n`);
@@ -528,11 +562,13 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
     control = await startControl({ store, port: controlPort, holds: proxy, schedule: proxy });
   } catch (err) {
     await proxy?.close();
+    await sqlMonitor?.end({ timeout: 1 });
     return fail(`could not listen: ${(err as Error).message}`);
   }
   io.err(
     `deadheat proxy: 127.0.0.1:${proxy.port} → ${upstream}. Point your app's DATABASE_URL at port ${proxy.port}.\n` +
-      `control: http://127.0.0.1:${control.port} (use with deadheat run --proxy). Ctrl-C to stop.\n`,
+      `control: http://127.0.0.1:${control.port} (use with deadheat run --proxy). Ctrl-C to stop.\n` +
+      `${lockNote}\n`,
   );
 
   const signal = io.signal ?? processSignal();
@@ -542,6 +578,7 @@ async function proxyCommand(argv: string[], io: Io): Promise<number> {
   });
   await control.close();
   await proxy.close();
+  await sqlMonitor?.end({ timeout: 1 });
   return EXIT_OK;
 }
 

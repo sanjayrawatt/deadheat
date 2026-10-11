@@ -286,3 +286,66 @@ describe("scheduler (controlled interleaving)", () => {
     }
   });
 });
+
+describe("scheduler lock waits (real row locks)", () => {
+  let locking: RunningProxy;
+  let direct: postgres.Sql;
+
+  beforeAll(async () => {
+    direct = postgres(UPSTREAM.toString(), { max: 1, onnotice: () => {} });
+    await direct`CREATE TABLE IF NOT EXISTS deadheat_locktest (id int PRIMARY KEY, n int)`;
+    locking = await startProxy({
+      upstream: { host: UPSTREAM.hostname, port: Number(UPSTREAM.port) },
+      monitor: {
+        blockers: async (pids) => {
+          const rows = await direct<{ pid: number; by: number[] }[]>`
+            SELECT pid, pg_blocking_pids(pid) AS by FROM unnest(${pids}::int[]) AS pid`;
+          return new Map(rows.map((r) => [r.pid, r.by]));
+        },
+      },
+    });
+  });
+  afterAll(async () => {
+    await locking.close();
+    await direct.end();
+  });
+
+  it("spots a step waiting on a row lock held by a request it holds back, and names the holder", async () => {
+    await direct`INSERT INTO deadheat_locktest VALUES (1, 0) ON CONFLICT (id) DO UPDATE SET n = 0`;
+    const url = new URL(UPSTREAM);
+    url.hostname = "127.0.0.1";
+    url.port = String(locking.port);
+    // Each request: BEGIN, UPDATE the same row, COMMIT. Request 1's UPDATE must wait for
+    // request 0's COMMIT, which the schedule only releases after it.
+    locking.setSchedule({
+      prefix: "l.1.",
+      requests: 2,
+      seed: 1,
+      policy: "forced",
+      order: [0, 0, 1, 1, 0, 1],
+    });
+    const request = async (i: number) => {
+      const c = new pg.Client({ connectionString: url.toString() });
+      await c.connect();
+      const tag = `/* deadheat_rid=l.1.${i} */ `;
+      try {
+        await c.query(`${tag}BEGIN`);
+        await c.query(`${tag}UPDATE deadheat_locktest SET n = n + 1 WHERE id = 1`);
+        await c.query(`${tag}COMMIT`);
+      } finally {
+        await c.end();
+      }
+    };
+    const t = performance.now();
+    try {
+      await Promise.all([request(0), request(1)]);
+    } finally {
+      const order = locking.setSchedule(null);
+      expect(order.map((s) => s.requestId.at(-1)).join("")).toBe("001101");
+      expect(order[3]).toMatchObject({ stalled: true, blockedBy: ["l.1.0"] });
+      expect(order.filter((s) => s.stalled)).toHaveLength(1);
+    }
+    expect(performance.now() - t).toBeLessThan(1000); // found by the probe, not the 2s timeout
+    expect((await direct`SELECT n FROM deadheat_locktest WHERE id = 1`)[0]!.n).toBe(2);
+  });
+});

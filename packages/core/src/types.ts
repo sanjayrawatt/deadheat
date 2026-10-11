@@ -99,6 +99,8 @@ export interface ScheduleStep {
   requestId: string;
   /** It didn't finish within the step timeout (probably waiting on a lock), so others went on. */
   stalled?: boolean;
+  /** Request ids holding the lock this step waited on (found with pg_blocking_pids). */
+  blockedBy?: string[];
   /** `barrier`: steps with the same phase were released together. */
   phase?: number;
   /** `forced`: released after replay stopped following the recorded order. */

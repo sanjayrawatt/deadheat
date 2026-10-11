@@ -145,6 +145,20 @@ describe("long release orders", () => {
   });
 });
 
+describe("lock waits", () => {
+  it("names which request waited on whose lock", () => {
+    const t = trial(2, false);
+    t.schedule = [
+      { requestId: "run-1.2.0" },
+      { requestId: "run-1.2.1", stalled: true, blockedBy: ["run-1.2.0"] },
+      { requestId: "run-1.2.2", stalled: true, blockedBy: ["run-1.2.0", "pid 77"] },
+    ];
+    expect(formatRun({ ...base, trials: [t] })).toContain(
+      "Lock waits (request → holder of the lock it waited on): #1 → #0; #2 → #0, pid 77",
+    );
+  });
+});
+
 describe("formatTrialDetail", () => {
   it("lists every request of a trial, including a passing one", () => {
     const text = formatTrialDetail(trial(1, true));

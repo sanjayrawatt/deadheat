@@ -123,3 +123,15 @@ A few lines after every session: what I tried, what broke, what I decided and wh
 - PCT sanity check: at N=2 it should hit about 1 in 4 (one change point must land right after the first `COUNT`); measured 19% over 100 trials.
 - **Replay vs the connection pool, found by running it for real:** replaying a barrier trial first serialised the phase (no race), then went off script at step 1. Booking-api's pool has 10 connections for 20 requests, so which requests can send a query at all isn't up to the proxy. Fixes: barrier phases replay together, and once replay leaves the recording it continues with the run's own policy and says it's a re-run. Random and unscheduled runs replay exactly. Barrier runs with more requests than pool connections reproduce only as re-runs (5/5), and the docs say so.
 - 149 tests.
+
+## Week 10 (Nov 30 – Dec 6, 2026)
+
+### 2026-10-11: blocked on a lock, or just slow?
+
+- The playbook's "hardest problem", now handled properly. The proxy learns each connection's backend pid from `BackendKeyData`, and `deadheat proxy` keeps one direct monitor connection. When a released step has run for 5ms, the scheduler asks `pg_blocking_pids` every 10ms. Blocked steps are marked with _who_ holds the lock, and the policy moves on.
+- Measured on the wallet (transfers queue on account 3's row lock): random 17.9s → 6.6s, barrier 12.4s → 3.7s for 10 trials, with the same violations under the same seed ([BENCHMARKS.md §8](docs/BENCHMARKS.md)).
+- With a probe, the step timeout becomes a 2s "slow" guard, so a slow query that isn't blocked keeps its turn instead of being skipped after 100ms (unit-tested).
+- The monitor URL is checked once at start. A wrong URL would otherwise turn every lock wait into a 2s timeout, so the proxy falls back to the 100ms timeout and says so.
+- New e2e: the wallet through the scheduling proxy (random and barrier). Every blocked step has a named lock holder.
+- A repeat of a mistake from the Toxiproxy investigation: `zsh` doesn't word-split `$1`, so my measurement script passed `--monitor-url <url>` as one unknown option. Passing the flag and the value as separate words fixes it. Writing it down so it doesn't happen a third time.
+- 157 tests.

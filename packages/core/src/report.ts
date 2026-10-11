@@ -2,6 +2,7 @@ import type { QueryRecord, RequestTrace, RunResult, TrialResult } from "./types.
 import { staleReadPattern } from "./widen.js";
 
 const MAX_STEPS = 30;
+const MAX_LOCK_WAITS = 8;
 
 export interface ReportOptions {
   /** How many violating trials to show in detail. */
@@ -100,6 +101,17 @@ function formatTrial(trial: TrialResult, maxRequests: number): string[] {
         : steps.join(" ");
     const seed = trial.seed === undefined ? "" : ` (trial seed ${trial.seed})`;
     lines.push(`    Release order${seed}: ${shown}${stalled}`);
+    const waits = trial.schedule.filter((s) => s.blockedBy?.length);
+    if (waits.length) {
+      const pairs = waits.map(
+        (s) => `${shortId(s.requestId)} → ${s.blockedBy!.map(shortId).join(", ")}`,
+      );
+      const shownPairs =
+        pairs.length > MAX_LOCK_WAITS
+          ? `${pairs.slice(0, MAX_LOCK_WAITS).join("; ")}; … +${pairs.length - MAX_LOCK_WAITS} more`
+          : pairs.join("; ");
+      lines.push(`    Lock waits (request → holder of the lock it waited on): ${shownPairs}`);
+    }
   }
   const stale = staleReadPattern(trial);
   if (stale) {
@@ -131,6 +143,12 @@ function formatInterleaving(requests: readonly RequestTrace[]): string[] {
     );
   }
   return lines;
+}
+
+function shortId(requestId: string): string {
+  return requestId.startsWith("pid ")
+    ? requestId
+    : `#${requestId.slice(requestId.lastIndexOf(".") + 1)}`;
 }
 
 function oneLine(sql: string): string {

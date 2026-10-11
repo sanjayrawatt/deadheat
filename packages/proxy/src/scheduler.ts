@@ -5,12 +5,24 @@ export type { ScheduleConfig, ScheduleStep };
 export const DEFAULT_QUIET_MS = 15;
 export const DEFAULT_START_TIMEOUT_MS = 250;
 export const DEFAULT_STEP_TIMEOUT_MS = 100;
+// With a lock probe, the timeout only guards against "slow", so it can be long.
+export const DEFAULT_SLOW_TIMEOUT_MS = 2000;
+const PROBE_AFTER_MS = 5;
+const PROBE_EVERY_MS = 10;
 export const DEFAULT_FORCE_TIMEOUT_MS = 2000;
 export const DEFAULT_PCT_DEPTH = 3;
 
 interface Running {
   step: ScheduleStep;
   at: number;
+}
+
+export interface SchedulerHooks {
+  /**
+   * Asks the database which of these running requests wait on a lock, and on whose. Returns
+   * only the blocked ones: request id → ids of the requests holding the lock.
+   */
+  probe?(requestIds: string[]): Promise<Map<string, string[]>>;
 }
 
 /**
@@ -26,6 +38,10 @@ interface Running {
  *   phase, released together once all its requests wait.
  * Choices only depend on the seed and the set of waiting requests (sorted by index), so the
  * same seed reproduces the same schedule.
+ *
+ * A released step that doesn't finish may be waiting on a row lock held by a request this
+ * scheduler is holding back. With a `probe`, such steps are found within ~10ms and marked
+ * with who blocks them; without one, a step timeout is the only signal.
  */
 export class Scheduler {
   readonly order: ScheduleStep[] = [];
@@ -47,11 +63,17 @@ export class Scheduler {
   private lastActivity = performance.now();
   private timer: NodeJS.Timeout | undefined;
   private stopped = false;
+  private probing = false;
+  private lastProbe = -Infinity;
 
-  constructor(readonly config: ScheduleConfig) {
+  constructor(
+    readonly config: ScheduleConfig,
+    private readonly hooks: SchedulerHooks = {},
+  ) {
     this.random = mulberry32(config.seed);
     this.quietMs = config.quietMs ?? DEFAULT_QUIET_MS;
-    this.stepTimeoutMs = config.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+    this.stepTimeoutMs =
+      config.stepTimeoutMs ?? (hooks.probe ? DEFAULT_SLOW_TIMEOUT_MS : DEFAULT_STEP_TIMEOUT_MS);
     this.policy = config.policy ?? "random";
     this.mode = this.policy;
     const pct = this.policy === "pct" || (this.policy === "forced" && config.fallback === "pct");
@@ -104,7 +126,24 @@ export class Scheduler {
         nextTimeout = Math.min(nextTimeout, r.at + this.stepTimeoutMs - now);
       }
     }
-    if (this.running.size) return this.wake(nextTimeout);
+    if (this.running.size) {
+      if (this.hooks.probe && !this.probing) {
+        const due = [...this.running].filter(([, r]) => now - r.at >= PROBE_AFTER_MS);
+        const slot = this.lastProbe + PROBE_EVERY_MS;
+        if (due.length && now >= slot) {
+          this.runProbe(
+            due.map(([id]) => id),
+            now,
+          );
+        } else {
+          const firstDue = Math.min(
+            ...[...this.running.values()].map((r) => r.at + PROBE_AFTER_MS),
+          );
+          nextTimeout = Math.min(nextTimeout, Math.max(firstDue, slot) - now);
+        }
+      }
+      return this.wake(nextTimeout);
+    }
 
     if (this.mode === "forced" && this.forcedAt >= (this.config.order?.length ?? 0)) {
       this.mode = this.config.fallback ?? "random";
@@ -171,6 +210,30 @@ export class Scheduler {
     this.running.set(requestId, { step, at: now });
     this.lastActivity = now;
     release();
+  }
+
+  private runProbe(requestIds: string[], now: number): void {
+    this.probing = true;
+    this.lastProbe = now;
+    this.hooks.probe!(requestIds).then(
+      (blocked) => {
+        this.probing = false;
+        if (this.stopped) return;
+        for (const [id, by] of blocked) {
+          const r = this.running.get(id);
+          if (!r) continue;
+          r.step.stalled = true;
+          r.step.blockedBy = by;
+          this.stalled.add(id);
+          this.running.delete(id);
+        }
+        this.decide();
+      },
+      () => {
+        this.probing = false;
+        if (!this.stopped) this.decide();
+      },
+    );
   }
 
   private wake(ms: number): void {

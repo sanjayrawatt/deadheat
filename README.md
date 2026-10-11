@@ -84,6 +84,8 @@ Both requests counted 0 bookings before either inserted: check-then-act on a sta
 
 **Force the interleaving:** add `--schedule random` (or `pct`, or `barrier`). The proxy holds every request's queries and releases them in an order chosen by a seed: one at a time at random, by PCT priorities, or phase by phase all together (for races inside a single statement). The report prints the seed and each violating trial's release order, and `--seed <n>` gives the same orders again.
 
+**Lock waits:** transfers in a transaction take row locks, so a query the scheduler releases can wait on a lock held by a request it's holding back. `deadheat proxy` spots this within ~10ms with `pg_blocking_pids` (it uses `DEADHEAT_DATABASE_URL`, or `--monitor-url`), moves on, and the report says which request waited on whose lock.
+
 **Replay a violation:** `deadheat replay <run-id> --proxy http://127.0.0.1:55434` re-runs the first violating trial of a saved run with its queries released in exactly the recorded order, and says whether the violation reproduced.
 
 **Look again later:** every run is saved to `.deadheat/runs/<run-id>.json`. `deadheat show` prints the latest one again, and `deadheat show <run-id> --trial 3` prints trial 3 in full, with every request and all of its SQL in order.

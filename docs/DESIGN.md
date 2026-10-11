@@ -157,7 +157,16 @@ Packages: `core` (scenario types, runner, strategies, reporter), `cli` (argument
 - **Replay's limit: the app's connection pool.** If a trial had more requests than the pool has connections, the pool decides which requests get a connection first, and that isn't recorded. Replay then waits for a request that can't send anything, gives up after 2s, and continues with the run's own policy (barrier for a barrier run). It prints a note saying this was a re-run, not an exact replay. Measured on booking-api (pool 10, 20 requests): random and unscheduled runs replayed exactly and reproduced. Barrier trials went off script at step 1 and reproduced as re-runs (5/5).
 - **Report:** names the policy, separates barrier phases with `|`, and the check-then-act hint now names the read made _last_ before the writes (the `COUNT`, not the capacity lookup).
 
-**Next (Weeks 10–11):** real lock-wait detection (`pg_locks` / `pg_stat_activity`) instead of the step timeout, shrinking a violating schedule to a minimal one, and the GitHub Action.
+**Built in Week 10** (lock-wait detection):
+
+- **The problem:** the scheduler holds request A's `COMMIT` and releases B's `UPDATE` on the row A has locked. B can't finish until A commits, and A can't commit until B finishes its step. Until now the 100ms step timeout broke this, which cost 100ms per lock wait, and the timeout also fired on a query that was merely slow.
+- **Backend pids:** the proxy reads each connection's backend pid from the server's `BackendKeyData`, and remembers which request last used each connection.
+- **Probe:** `deadheat proxy` opens one direct connection (`--monitor-url`, else `DEADHEAT_DATABASE_URL`, checked once at start). When a released step has run for 5ms, the scheduler asks every 10ms: `SELECT pid, pg_blocking_pids(pid) FROM unnest($1::int[]) pid`. A blocked step is marked `stalled` with `blockedBy` (the holders' request ids), and the policy goes on. A step that isn't blocked keeps its turn: with a probe, the step timeout is a 2s guard against "slow", no longer a lock guess.
+- **No bias:** detection only changes _when_ the next decision happens, never _which_ request the seeded policy picks.
+- **Report:** `Lock waits (request → holder of the lock it waited on): #1 → #0; …`.
+- Without a monitor connection, the proxy says so at start, and steps are still released after the 100ms timeout.
+
+**Next (Week 11):** shrinking a violating trial to the fewest requests (and steps) that still break the invariant, and the GitHub Action.
 
 ## 6. Report format
 
